@@ -1,0 +1,52 @@
+{
+  "fixtures": [
+    {"raw": "gosec.json", "hdf": "gosec.hdf.json", "from": "gosec", "label": "SAST"},
+    {"raw": "zap.json", "hdf": "zap.hdf.json", "from": "zap", "label": "DAST"},
+    {"raw": "grype.json", "hdf": "grype.hdf.json", "from": "grype", "label": "vuln"},
+    {"raw": "grype-prev.json", "hdf": "grype-prev.hdf.json", "from": "grype", "label": "vuln (prev scan)"}
+  ],
+  "questions": [
+    {
+      "category": "1 single-fact (small src)",
+      "prompt": "How many failed findings are in the gosec (SAST) scan?",
+      "rawFiles": ["gosec.json"],
+      "calls": [
+        {"tool": "hdf_query", "args": {"source": {"path": "gosec.hdf.json"}, "status": ["failed"], "verbosity": "concise"}}
+      ]
+    },
+    {
+      "category": "1 single-fact (large src)",
+      "prompt": "How many failed findings are in the grype (vuln) scan?",
+      "rawFiles": ["grype.json"],
+      "calls": [
+        {"tool": "hdf_query", "args": {"source": {"path": "grype.hdf.json"}, "status": ["failed"], "verbosity": "concise"}}
+      ]
+    },
+    {
+      "category": "2 cross-format aggregate",
+      "prompt": "Compliance rollups across the SAST, DAST, and vuln scans (all three consulted).",
+      "rawFiles": ["gosec.json", "zap.json", "grype.json"],
+      "calls": [
+        {"tool": "hdf_compliance", "args": {"source": {"path": "gosec.hdf.json"}}},
+        {"tool": "hdf_compliance", "args": {"source": {"path": "zap.hdf.json"}}},
+        {"tool": "hdf_compliance", "args": {"source": {"path": "grype.hdf.json"}}}
+      ]
+    },
+    {
+      "category": "3 compliance rollup",
+      "prompt": "Overall compliance percentage + status/severity breakdown of the grype scan.",
+      "rawFiles": ["grype.json"],
+      "calls": [
+        {"tool": "hdf_compliance", "args": {"source": {"path": "grype.hdf.json"}}}
+      ]
+    },
+    {
+      "category": "4 temporal diff",
+      "prompt": "What changed between the previous and current grype scans?",
+      "rawFiles": ["grype-prev.json", "grype.json"],
+      "calls": [
+        {"tool": "hdf_diff", "args": {"from": {"path": "grype-prev.hdf.json"}, "to": {"path": "grype.hdf.json"}, "mode": "temporal", "verbosity": "concise"}}
+      ]
+    }
+  ]
+}
