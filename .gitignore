@@ -1,0 +1,6 @@
+# A locally-built hdf binary (point at it with HDF_BIN instead of committing)
+/hdf
+# Go test/coverage artifacts
+*.test
+*.out
+coverage*
