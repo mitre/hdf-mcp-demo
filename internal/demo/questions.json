@@ -3,7 +3,9 @@
     {"raw": "gosec.json", "hdf": "gosec.hdf.json", "from": "gosec", "label": "SAST"},
     {"raw": "zap.json", "hdf": "zap.hdf.json", "from": "zap", "label": "DAST"},
     {"raw": "grype.json", "hdf": "grype.hdf.json", "from": "grype", "label": "vuln"},
-    {"raw": "grype-prev.json", "hdf": "grype-prev.hdf.json", "from": "grype", "label": "vuln (prev scan)"}
+    {"raw": "grype-prev.json", "hdf": "grype-prev.hdf.json", "from": "grype", "label": "vuln (prev scan)"},
+    {"raw": "inspec.json", "hdf": "inspec.hdf.json", "cliPrep": ["convert", "{raw}", "-o", "{hdf}"], "label": "CCE (InSpec)"},
+    {"raw": "spdx.json", "hdf": "spdx.system.hdf.json", "cliPrep": ["system", "create", "{raw}", "--from", "spdx", "-o", "{hdf}"], "label": "SBOM (SPDX)"}
   ],
   "questions": [
     {
@@ -33,11 +35,28 @@
       ]
     },
     {
-      "category": "3 compliance rollup",
+      "category": "2 cross-doc join (SBOM x vuln)",
+      "prompt": "What components does the SBOM inventory declare, and what vulnerabilities did the scan find (to cross-reference)?",
+      "rawFiles": ["spdx.json", "grype.json"],
+      "calls": [
+        {"tool": "hdf_inspect", "args": {"source": {"path": "spdx.system.hdf.json"}, "verbosity": "concise"}},
+        {"tool": "hdf_query", "args": {"source": {"path": "grype.hdf.json"}, "verbosity": "concise"}}
+      ]
+    },
+    {
+      "category": "3 compliance rollup (vuln)",
       "prompt": "Overall compliance percentage + status/severity breakdown of the grype scan.",
       "rawFiles": ["grype.json"],
       "calls": [
         {"tool": "hdf_compliance", "args": {"source": {"path": "grype.hdf.json"}}}
+      ]
+    },
+    {
+      "category": "3 compliance rollup (CCE)",
+      "prompt": "Overall compliance percentage + control status breakdown of the InSpec (CIS) scan.",
+      "rawFiles": ["inspec.json"],
+      "calls": [
+        {"tool": "hdf_compliance", "args": {"source": {"path": "inspec.hdf.json"}}}
       ]
     },
     {
@@ -46,6 +65,15 @@
       "rawFiles": ["grype-prev.json", "grype.json"],
       "calls": [
         {"tool": "hdf_diff", "args": {"from": {"path": "grype-prev.hdf.json"}, "to": {"path": "grype.hdf.json"}, "mode": "temporal", "verbosity": "concise"}}
+      ]
+    },
+    {
+      "category": "5 tool-specific field (HDF loses)",
+      "prompt": "What was grype's match provenance (matchDetails.searchedBy/type) for a finding? HDF normalization drops this, so the agent must fall back to the raw scan.",
+      "rawFiles": ["grype.json"],
+      "hdfNeedsRaw": true,
+      "calls": [
+        {"tool": "hdf_query", "args": {"source": {"path": "grype.hdf.json"}, "verbosity": "concise"}}
       ]
     }
   ]

@@ -64,7 +64,7 @@ func TestDemo_EmitsTable(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	rows, err := Run(ctx, sess, fixturesDir, root, bank)
+	rows, err := Run(ctx, sess, bin, fixturesDir, root, bank)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

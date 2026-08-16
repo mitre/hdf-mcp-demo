@@ -16,3 +16,7 @@ export HDF_BIN="${HDF}"
 echo "Using hdf: ${HDF_BIN}"
 
 go test ./... "$@"
+
+echo
+echo "=== token-efficiency demo ==="
+go run ./cmd/demo

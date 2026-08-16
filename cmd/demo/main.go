@@ -55,7 +55,7 @@ func run(fixturesDir string) error {
 	}
 	defer func() { _ = sess.Close() }()
 
-	rows, err := demo.Run(ctx, sess, fixturesDir, root, bank)
+	rows, err := demo.Run(ctx, sess, bin, fixturesDir, root, bank)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,12 +27,18 @@ import (
 //go:embed questions.json
 var questionsJSON []byte
 
-// Fixture is a raw source scan and how to normalize it to HDF via hdf_convert.
+// Fixture is a raw source scan and how to normalize it to HDF. Most scan formats
+// go through the MCP hdf_convert tool (From set). SBOM (SPDX → HDF System) and
+// legacy InSpec ExecJSON are not hdf_convert paths, so they use CLIPrep: an
+// argv for the shipped `hdf` binary with {raw}/{hdf} placeholders (absolute
+// paths under the root). This mirrors the real pipeline — normalize once with the
+// CLI or MCP, then query with the MCP.
 type Fixture struct {
-	Raw   string `json:"raw"`   // raw filename (under the fixtures dir and staged under the root)
-	HDF   string `json:"hdf"`   // HDF output filename written under the root
-	From  string `json:"from"`  // hdf_convert source format
-	Label string `json:"label"` // human label (SAST/DAST/vuln/...)
+	Raw     string   `json:"raw"`               // raw filename (under the fixtures dir and staged under the root)
+	HDF     string   `json:"hdf"`               // HDF output filename written under the root
+	From    string   `json:"from,omitempty"`    // hdf_convert source format (MCP path)
+	CLIPrep []string `json:"cliPrep,omitempty"` // instead of hdf_convert: run `hdf <args>` ({raw}/{hdf} substituted)
+	Label   string   `json:"label"`             // human label (SAST/DAST/vuln/SBOM/CCE)
 }
 
 // Call is one MCP tool invocation answering a question.
@@ -42,11 +49,17 @@ type Call struct {
 
 // Question pairs the raw files a raw-file agent must read with the HDF MCP calls
 // that answer the same question against normalized HDF.
+//
+// HDFNeedsRaw marks a category-5 (tool-specific field) question: the field the
+// question asks about is dropped by HDF normalization, so the HDF arm cannot
+// answer from the bounded response and must ALSO read the raw file. Its token
+// cost then includes the raw bytes — the honest case where HDF LOSES.
 type Question struct {
-	Category string   `json:"category"`
-	Prompt   string   `json:"prompt"`
-	RawFiles []string `json:"rawFiles"`
-	Calls    []Call   `json:"calls"`
+	Category    string   `json:"category"`
+	Prompt      string   `json:"prompt"`
+	RawFiles    []string `json:"rawFiles"`
+	Calls       []Call   `json:"calls"`
+	HDFNeedsRaw bool     `json:"hdfNeedsRaw,omitempty"`
 }
 
 // Bank is the demo corpus: fixtures to normalize + the question set.
@@ -73,10 +86,12 @@ func LoadBank() (Bank, error) {
 	return b, nil
 }
 
-// Run stages the raw fixtures under root, normalizes each to HDF via the shipped
-// MCP server (hdf_convert), then measures raw-vs-HDF token cost per question. The
-// session must already be connected with HDF_MCP_ROOT=root and writes enabled.
-func Run(ctx context.Context, sess *mcpclient.Session, fixturesDir, root string, bank Bank) ([]Row, error) {
+// Run stages the raw fixtures under root, normalizes each to HDF (via the MCP
+// hdf_convert tool, or a fixture's CLIPrep argv on the `hdf` binary), then
+// measures raw-vs-HDF token cost per question. The session must already be
+// connected with HDF_MCP_ROOT=root and writes enabled; bin is the same `hdf`
+// binary the session drives (used for CLIPrep normalization).
+func Run(ctx context.Context, sess *mcpclient.Session, bin, fixturesDir, root string, bank Bank) ([]Row, error) {
 	rawTokens := map[string]int{}
 	for _, f := range bank.Fixtures {
 		b, err := os.ReadFile(filepath.Join(fixturesDir, f.Raw))
@@ -92,6 +107,12 @@ func Run(ctx context.Context, sess *mcpclient.Session, fixturesDir, root string,
 		}
 		rawTokens[f.Raw] = n
 
+		if len(f.CLIPrep) > 0 {
+			if err := cliPrep(ctx, bin, root, f); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if _, err := sess.Call(ctx, "hdf_convert", map[string]any{
 			"source": map[string]any{"path": f.Raw}, "from": f.From, "output": f.HDF,
 		}); err != nil {
@@ -117,6 +138,11 @@ func Run(ctx context.Context, sess *mcpclient.Session, fixturesDir, root string,
 			}
 			hdf += n
 		}
+		// Category 5: the field is dropped by normalization, so the HDF arm must
+		// fall back to the raw file — HDF pays its own response PLUS the raw bytes.
+		if q.HDFNeedsRaw {
+			hdf += raw
+		}
 		ratio := 0.0
 		if hdf > 0 {
 			ratio = float64(raw) / float64(hdf)
@@ -126,24 +152,40 @@ func Run(ctx context.Context, sess *mcpclient.Session, fixturesDir, root string,
 	return rows, nil
 }
 
+// cliPrep normalizes a fixture to HDF by running the shipped `hdf` binary (for
+// paths hdf_convert does not cover: SBOM → System, legacy InSpec ExecJSON). It
+// substitutes {raw} and {hdf} with absolute paths under root.
+func cliPrep(ctx context.Context, bin, root string, f Fixture) error {
+	args := make([]string, len(f.CLIPrep))
+	repl := strings.NewReplacer("{raw}", filepath.Join(root, f.Raw), "{hdf}", filepath.Join(root, f.HDF))
+	for i, a := range f.CLIPrep {
+		args[i] = repl.Replace(a)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cli-prep %s (%s): %w: %s", f.Raw, strings.Join(args, " "), err, out)
+	}
+	return nil
+}
+
 // RenderTable formats the rows as a fixed-width table plus a total line.
 func RenderTable(rows []Row) string {
 	var b strings.Builder
 	b.WriteString("HDF-MCP vs. raw-file token cost (lower HDF is better; ratio = raw/HDF)\n")
-	b.WriteString(fmt.Sprintf("%-28s %10s %10s %9s\n", "category", "raw tok", "HDF tok", "raw/HDF"))
-	b.WriteString(strings.Repeat("-", 60) + "\n")
+	b.WriteString(fmt.Sprintf("%-34s %10s %10s %9s\n", "category", "raw tok", "HDF tok", "raw/HDF"))
+	b.WriteString(strings.Repeat("-", 66) + "\n")
 	var totalRaw, totalHDF int
 	for _, r := range rows {
-		b.WriteString(fmt.Sprintf("%-28s %10d %10d %8.1fx\n", r.Category, r.RawTokens, r.HDFTokens, r.Ratio))
+		b.WriteString(fmt.Sprintf("%-34s %10d %10d %8.1fx\n", r.Category, r.RawTokens, r.HDFTokens, r.Ratio))
 		totalRaw += r.RawTokens
 		totalHDF += r.HDFTokens
 	}
-	b.WriteString(strings.Repeat("-", 60) + "\n")
+	b.WriteString(strings.Repeat("-", 66) + "\n")
 	overall := 0.0
 	if totalHDF > 0 {
 		overall = float64(totalRaw) / float64(totalHDF)
 	}
-	b.WriteString(fmt.Sprintf("%-28s %10d %10d %8.1fx\n", "TOTAL", totalRaw, totalHDF, overall))
+	b.WriteString(fmt.Sprintf("%-34s %10d %10d %8.1fx\n", "TOTAL", totalRaw, totalHDF, overall))
 	return b.String()
 }
 
