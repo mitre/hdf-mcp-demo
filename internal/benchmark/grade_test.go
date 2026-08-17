@@ -57,11 +57,11 @@ func TestGrade_Bool(t *testing.T) {
 }
 
 // A Class-C raw arm gets an unanswerable key: any concrete number is a
-// hallucination (Wrong); a declination is Abstained.
+// Hallucination (out of remit, not a scored failure); a declination is Abstained.
 func TestGrade_UnanswerableKey(t *testing.T) {
 	key := truth.Unanswerable()
-	if got := Grade("ANSWER: 40", key, KindCount); got != Wrong {
-		t.Errorf("concrete answer to unanswerable = %s, want Wrong", got)
+	if got := Grade("ANSWER: 40", key, KindCount); got != Hallucinated {
+		t.Errorf("concrete answer to unanswerable = %s, want Hallucinated", got)
 	}
 	if got := Grade("I cannot compute a compliance rate from a raw vuln scan. ANSWER: n/a", key, KindCount); got != Abstained {
 		t.Errorf("declination to unanswerable = %s, want Abstained", got)

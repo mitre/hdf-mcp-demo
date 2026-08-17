@@ -19,10 +19,11 @@ const (
 type Verdict string
 
 const (
-	Correct   Verdict = "correct"   // extracted answer matches the key
-	Wrong     Verdict = "wrong"     // extracted a concrete answer, but not the key
-	Abstained Verdict = "abstained" // declined / no extractable answer
-	Failed    Verdict = "failed"    // the arm errored or timed out (e.g. over-context) before answering
+	Correct      Verdict = "correct"      // extracted answer matches the key
+	Wrong        Verdict = "wrong"        // extracted a concrete answer, but not the key
+	Abstained    Verdict = "abstained"    // declined / no extractable answer
+	Failed       Verdict = "failed"       // the arm errored or timed out (e.g. over-context) before answering
+	Hallucinated Verdict = "hallucinated" // gave a concrete answer to a question its data view cannot answer (out of remit)
 )
 
 // Grading is intentionally lenient and therefore imperfect: it parses a final
@@ -50,8 +51,9 @@ func finalAnswer(reply string) string {
 }
 
 // Grade reduces reply to a value per kind and compares it to key. When key is
-// unanswerable (the raw arm of a Class-C question, which has no correct answer),
-// a concrete answer is Wrong (a hallucination) and a declination is Abstained.
+// unanswerable (the raw arm of an hdf-only question, which has no correct answer
+// and is out of remit), a concrete answer is Hallucinated and a declination is
+// Abstained — neither counts toward scored accuracy.
 func Grade(reply string, key truth.Answer, kind Kind) Verdict {
 	scope := finalAnswer(reply)
 	whole := scope == ""
@@ -66,7 +68,7 @@ func Grade(reply string, key truth.Answer, kind Kind) Verdict {
 			return Abstained
 		}
 		if !key.Answerable {
-			return Wrong // asserted a boolean where none is answerable
+			return Hallucinated // asserted a boolean where none is answerable (out of remit)
 		}
 		if got == (key.Value == "true") {
 			return Correct
@@ -84,7 +86,7 @@ func Grade(reply string, key truth.Answer, kind Kind) Verdict {
 			return Abstained
 		}
 		if !key.Answerable {
-			return Wrong // produced a number where none is answerable
+			return Hallucinated // produced a number where none is answerable (out of remit)
 		}
 		if got == key.Value {
 			return Correct

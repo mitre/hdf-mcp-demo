@@ -128,7 +128,7 @@ func TestBenchmark_Pipeline(t *testing.T) {
 	}
 
 	out := Render("stub", results, false)
-	for _, must := range []string{"accuracy by class", "token cost", "notes / limitations", "hdf-mcp arm (pipeline)"} {
+	for _, must := range []string{"accuracy by type", "token cost", "notes / limitations", "hdf-mcp arm (pipeline)"} {
 		if !strings.Contains(out, must) {
 			t.Errorf("report missing %q", must)
 		}

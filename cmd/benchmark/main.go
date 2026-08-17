@@ -40,11 +40,14 @@ func main() {
 	modelsFlag := flag.String("models", "", "comma-separated models to run; overrides OPENAI_MODEL_LIST/OPENAI_MODEL when set")
 	timeout := flag.Duration("timeout", 30*time.Minute, "overall run timeout for the whole invocation (raise when a slow/cold reasoning model is in the list)")
 	perModel := flag.Duration("model-timeout", 0, "optional per-model timeout; 0 = share the overall -timeout across all models")
+	format := flag.String("format", "text", "output format: text | json | markdown")
+	outPath := flag.String("out", "", "write results to this file instead of stdout (progress still goes to stderr)")
 	flag.Parse()
 
 	cfg := runConfig{
 		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
 		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
+		format: strings.ToLower(*format), outPath: *outPath,
 	}
 	if err := run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -60,6 +63,8 @@ type runConfig struct {
 	concurrency       int
 	models            []string
 	timeout, perModel time.Duration
+	format            string
+	outPath           string
 }
 
 // splitModels parses the comma-separated -models flag, trimming blanks.
@@ -81,6 +86,11 @@ func run(cfg runConfig) error {
 	}
 	if base == "" || len(models) == 0 {
 		return fmt.Errorf("set OPENAI_BASE_URL and OPENAI_MODEL or OPENAI_MODEL_LIST (or pass -models); and OPENAI_API_KEY if required")
+	}
+	switch cfg.format {
+	case "text", "json", "markdown", "md":
+	default:
+		return fmt.Errorf("unknown -format %q (want text | json | markdown)", cfg.format)
 	}
 	bin, err := locateHDF()
 	if err != nil {
@@ -106,12 +116,20 @@ func run(cfg runConfig) error {
 	bank := benchmark.Bank()
 	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency}
 
-	// Echo exactly what will run — catches a stale OPENAI_MODEL_LIST silently
-	// overriding an intended single model.
-	fmt.Printf("endpoint: %s   hdf: %s\nmodels: %s   questions: %d   concurrency: %d   ad-hoc: %v\n\n",
-		base, bin, strings.Join(models, ", "), len(bank), cfg.concurrency, cfg.adhoc)
+	// Echo exactly what will run (to stderr, so stdout stays clean for json/markdown)
+	// — catches a stale OPENAI_MODEL_LIST silently overriding an intended single model.
+	fmt.Fprintf(os.Stderr, "endpoint: %s   hdf: %s\nmodels: %s   questions: %d   concurrency: %d   ad-hoc: %v   format: %s\n\n",
+		base, bin, strings.Join(models, ", "), len(bank), cfg.concurrency, cfg.adhoc, cfg.format)
 
-	succeeded := 0
+	meta := benchmark.RunMeta{
+		Timestamp: time.Now().UTC().Format(time.RFC3339), Models: models,
+		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
+	}
+	incremental := cfg.format == "text" && cfg.outPath == ""
+	if incremental {
+		fmt.Println(benchmark.MetaText(meta))
+	}
+	var runs []benchmark.ModelRun
 	for _, model := range models {
 		inst := instrument.NewOpenAI(base, model, os.Getenv("OPENAI_API_KEY"))
 		inst.MaxTokens = cfg.maxTokens
@@ -130,13 +148,53 @@ func run(cfg runConfig) error {
 			continue
 		}
 		benchmark.SortByID(results)
-		fmt.Println(benchmark.Render(inst.Name(), results, cfg.adhoc))
-		fmt.Println()
-		succeeded++
+		runs = append(runs, benchmark.ModelRun{Model: inst.Name(), Results: results})
+		if incremental {
+			fmt.Println(benchmark.Render(inst.Name(), results, cfg.adhoc))
+			fmt.Println()
+		} else {
+			fmt.Fprintf(os.Stderr, "  %s done (%d questions)\n", inst.Name(), len(results))
+		}
 	}
-	if succeeded == 0 {
+	if len(runs) == 0 {
 		return fmt.Errorf("no model completed the study (see per-model errors above)")
 	}
+	if incremental {
+		return nil // already streamed to stdout
+	}
+	return emit(cfg, meta, runs)
+}
+
+// emit renders the collected runs in the chosen format and writes them to the
+// output file (or stdout).
+func emit(cfg runConfig, meta benchmark.RunMeta, runs []benchmark.ModelRun) error {
+	var out string
+	switch cfg.format {
+	case "json":
+		s, err := benchmark.RenderJSON(meta, runs, cfg.adhoc)
+		if err != nil {
+			return err
+		}
+		out = s
+	case "markdown", "md":
+		out = benchmark.RenderMarkdown(meta, runs, cfg.adhoc)
+	default: // text with -out: metadata header + per-model text tables
+		var b strings.Builder
+		b.WriteString(benchmark.MetaText(meta) + "\n")
+		for _, r := range runs {
+			b.WriteString(benchmark.Render(r.Model, r.Results, cfg.adhoc))
+			b.WriteString("\n")
+		}
+		out = b.String()
+	}
+	if cfg.outPath == "" {
+		fmt.Println(out)
+		return nil
+	}
+	if err := os.WriteFile(cfg.outPath, []byte(out), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", cfg.outPath, err)
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s (%s)\n", cfg.outPath, cfg.format)
 	return nil
 }
 

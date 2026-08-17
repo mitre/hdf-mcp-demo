@@ -69,10 +69,14 @@ func (o Options) concurrency() int {
 
 // ArmResult is one arm's answer plus its graded verdict and real cost. Err is set
 // (and Verdict is Failed) when the arm errored or timed out before answering.
+// Scored is false when the arm was out of remit for the question — its data view
+// cannot answer it (the raw arm on an hdf-native question) — so it is excluded
+// from accuracy and its answer is reported only as hallucinate-vs-abstain.
 type ArmResult struct {
 	Arm     Arm
 	Answer  string
 	Verdict Verdict
+	Scored  bool
 	Err     string
 	Cost    agent.Result
 }
@@ -185,9 +189,9 @@ func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB a
 func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind) ArmResult {
 	res, err := agent.Run(ctx, inst, tb, opts.system(), prompt, opts.maxIters())
 	if err != nil {
-		return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Failed, Err: err.Error(), Cost: res}
+		return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Failed, Scored: key.Answerable, Err: err.Error(), Cost: res}
 	}
-	return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Grade(res.Answer, key, kind), Cost: res}
+	return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Grade(res.Answer, key, kind), Scored: key.Answerable, Cost: res}
 }
 
 // stageAndConvert copies each referenced raw fixture under root and normalizes it

@@ -8,57 +8,62 @@ import (
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
 
-// Render formats a model's results: a per-question detail table, per-class
-// accuracy for each arm, both token-cost views, and an honesty footer stating the
-// method's limitations. model names the instrument. adHoc reflects whether the
-// conversion-included view was measured.
+// Render formats a model's results: a per-question detail table, per-question-type
+// accuracy for each arm (scored only over questions the arm can answer), both
+// token-cost views, and an honesty footer. model names the instrument.
 func Render(model string, results []QuestionResult, adHoc bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "model: %s   (%d questions)\n\n", model, len(results))
 
 	// Per-question detail.
+	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s", "question", "type", "raw", "hdf", "rawTok", "hdfTok")
 	if adHoc {
-		fmt.Fprintf(&b, "%-22s %-2s %-9s %-9s %8s %8s %8s\n", "question", "cl", "raw", "hdf", "rawTok", "hdfTok", "adhocTok")
-	} else {
-		fmt.Fprintf(&b, "%-22s %-2s %-9s %-9s %8s %8s\n", "question", "cl", "raw", "hdf", "rawTok", "hdfTok")
+		hdr += fmt.Sprintf(" %8s", "adhocTok")
 	}
-	b.WriteString(strings.Repeat("-", ruleWidth(adHoc)) + "\n")
+	b.WriteString(hdr + "\n" + strings.Repeat("-", len(hdr)) + "\n")
 	for _, r := range results {
+		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d",
+			trunc(r.ID, 22), typeLabel(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
+			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens())
 		if adHoc {
 			ah := 0
 			if r.HDFAdHoc != nil {
 				ah = r.HDFAdHoc.Cost.TotalTokens()
 			}
-			fmt.Fprintf(&b, "%-22s %-2s %-9s %-9s %8d %8d %8d\n",
-				trunc(r.ID, 22), string(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
-				r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(), ah)
-		} else {
-			fmt.Fprintf(&b, "%-22s %-2s %-9s %-9s %8d %8d\n",
-				trunc(r.ID, 22), string(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
-				r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens())
+			line += fmt.Sprintf(" %8d", ah)
 		}
+		b.WriteString(line + "\n")
 	}
 
-	// Accuracy by class.
-	b.WriteString("\naccuracy by class (correct / questions):\n")
-	fmt.Fprintf(&b, "%-30s %-12s %-12s\n", "class", "raw-file", "hdf-mcp")
-	b.WriteString(strings.Repeat("-", 54) + "\n")
+	// Accuracy by type — scored only over the questions each arm can answer, so the
+	// raw arm is never penalized on hdf-only questions it isn't meant to answer.
+	b.WriteString("\naccuracy by type (correct / questions the arm can answer):\n")
+	fmt.Fprintf(&b, "%-26s %-12s %-12s\n", "type", "raw-file", "hdf-mcp")
+	b.WriteString(strings.Repeat("-", 50) + "\n")
 	for _, c := range []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC} {
 		sub := filterClass(results, c)
 		if len(sub) == 0 {
 			continue
 		}
-		rc, hc := correct(sub, ArmRaw), correct(sub, ArmHDF)
-		fmt.Fprintf(&b, "%-30s %-12s %-12s\n", classLabel(c), frac(rc, len(sub)), frac(hc, len(sub)))
+		rc, rn := scoredAccuracy(sub, ArmRaw)
+		hc, hn := scoredAccuracy(sub, ArmHDF)
+		fmt.Fprintf(&b, "%-26s %-12s %-12s\n", classRowLabel(c), frac(rc, rn), frac(hc, hn))
 	}
-	rc, hc := correct(results, ArmRaw), correct(results, ArmHDF)
-	fmt.Fprintf(&b, "%-30s %-12s %-12s\n", "ALL", frac(rc, len(results)), frac(hc, len(results)))
+	rc, rn := scoredAccuracy(results, ArmRaw)
+	hc, hn := scoredAccuracy(results, ArmHDF)
+	fmt.Fprintf(&b, "%-26s %-12s %-12s\n", "ALL (scored)", frac(rc, rn), frac(hc, hn))
 
-	// Surface failed arms (errored/over-context/timeout) explicitly — they count
-	// against accuracy and are easy to miss in the verdict column.
+	// Out-of-remit behavior: on hdf-only questions the raw arm can't answer, did it
+	// correctly abstain or invent a plausible-but-wrong answer? (Informational — not
+	// scored. Frequent hallucination here is itself a point FOR HDF.)
+	if hall, abst, outOf := remit(results, ArmRaw); outOf > 0 {
+		fmt.Fprintf(&b, "\nraw-file arm on hdf-only questions (out of remit, not scored): %d hallucinated / %d abstained of %d\n",
+			hall, abst, outOf)
+	}
+
+	// Failed arms (errored/over-context/timeout) among scored questions.
 	if rf, hf := failures(results, ArmRaw), failures(results, ArmHDF); rf > 0 || hf > 0 {
-		fmt.Fprintf(&b, "%-30s %-12s %-12s   (errored/over-context/timeout)\n", "  of which failed",
-			fmt.Sprintf("%d", rf), fmt.Sprintf("%d", hf))
+		fmt.Fprintf(&b, "failed (errored/over-context/timeout): raw %d, hdf %d\n", rf, hf)
 	}
 
 	// Cost views.
@@ -74,32 +79,51 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	return b.String()
 }
 
-func ruleWidth(adHoc bool) int {
-	if adHoc {
-		return 72
+// typeLabel is the compact, non-hierarchical name for a question's grading nature.
+// The A/B/C classes are an internal code; readers see descriptive words that don't
+// imply one type is "better" than another.
+func typeLabel(c truth.Class) string {
+	switch c {
+	case truth.ClassA:
+		return "objective"
+	case truth.ClassB:
+		return "interpretive"
+	default:
+		return "hdf-only"
 	}
-	return 63
+}
+
+// classRowLabel is typeLabel plus a short gloss, for the accuracy table.
+func classRowLabel(c truth.Class) string {
+	switch c {
+	case truth.ClassA:
+		return "objective (shared fact)"
+	case truth.ClassB:
+		return "interpretive (to intent)"
+	default:
+		return "hdf-only (raw n/a)"
+	}
 }
 
 func footer(adHoc bool) string {
 	lines := []string{
 		"",
 		"notes / limitations (read before trusting a number):",
-		"  - Class A grades both arms to the same value; Class B grades to the question's",
-		"    stated intent (bidirectional — some favor raw volume, some favor HDF dedup);",
-		"    Class C has no raw-answerable truth, so a concrete raw answer counts as a",
-		"    hallucination (wrong), an abstention as 'abstained'.",
+		"  - Question types are a grading distinction, NOT a ranking. 'objective': one",
+		"    answer both arms should reach. 'interpretive': the fair answer depends on the",
+		"    question's intent, graded bidirectionally (e.g. distinct rule violations vs raw",
+		"    finding volume). 'hdf-only': raw scanners can't natively express it (compliance",
+		"    %, effective status) — the raw arm is out of remit and not scored on these.",
+		"  - Accuracy is scored only over questions an arm can answer. On hdf-only questions",
+		"    the raw arm's hallucinate-vs-abstain is reported separately, not as a failure.",
 		"  - Grading parses an 'ANSWER: <value>' line; a correct answer buried in prose",
 		"    without that line may read as abstained. Grading favors abstention over false",
 		"    credit. No LLM judge is used.",
 		"  - Cost is real endpoint token usage; the hdf-mcp prompt tokens already include",
-		"    the tool-schema tax. Small scans can make HDF cost MORE — that is expected and",
-		"    is the point of measuring rather than assuming.",
-		"  - A 'failed' arm errored or timed out before answering (commonly a raw scan too",
-		"    large to fit context); it counts against that arm's accuracy. The raw arm uses",
-		"    grep + paginated reads with NO format hints, so it must discover the schema and",
-		"    choose what to search for — the real cost of raw work without HDF's normalized",
-		"    shape. A whole-file read is refused above a size cap.",
+		"    the tool-schema tax. Small scans can make HDF cost MORE — expected, and the",
+		"    point of measuring rather than assuming.",
+		"  - A 'failed' arm errored or timed out before answering. The raw arm uses grep +",
+		"    paginated reads with NO format hints, so it must discover the schema itself.",
 		"  - N is small and a single run is noisy; treat as directional, not definitive.",
 	}
 	if adHoc {
@@ -108,17 +132,6 @@ func footer(adHoc bool) string {
 			"    view charges the agent's on-demand hdf_convert round-trip.")
 	}
 	return strings.Join(lines, "\n") + "\n"
-}
-
-func classLabel(c truth.Class) string {
-	switch c {
-	case truth.ClassA:
-		return "A answer-preserving"
-	case truth.ClassB:
-		return "B normalization-divergent"
-	default:
-		return "C HDF-native"
-	}
 }
 
 func filterClass(rs []QuestionResult, c truth.Class) []QuestionResult {
@@ -131,27 +144,53 @@ func filterClass(rs []QuestionResult, c truth.Class) []QuestionResult {
 	return out
 }
 
-func armVerdict(r QuestionResult, arm Arm) Verdict {
-	if arm == ArmHDF {
-		return r.HDF.Verdict
+func armOf(r QuestionResult, a Arm) ArmResult {
+	if a == ArmHDF {
+		return r.HDF
 	}
-	return r.Raw.Verdict
+	return r.Raw
 }
 
-func correct(rs []QuestionResult, arm Arm) int {
-	n := 0
+// scoredAccuracy returns correct answers and the number of in-remit (scored)
+// questions for an arm — questions out of the arm's remit are excluded.
+func scoredAccuracy(rs []QuestionResult, arm Arm) (correct, scored int) {
 	for _, r := range rs {
-		if armVerdict(r, arm) == Correct {
-			n++
+		a := armOf(r, arm)
+		if !a.Scored {
+			continue
+		}
+		scored++
+		if a.Verdict == Correct {
+			correct++
 		}
 	}
-	return n
+	return
 }
 
+// remit reports, over an arm's OUT-of-remit questions, how many it answered anyway
+// (hallucinated) vs correctly declined (abstained), and the out-of-remit total.
+func remit(rs []QuestionResult, arm Arm) (hallucinated, abstained, outOf int) {
+	for _, r := range rs {
+		a := armOf(r, arm)
+		if a.Scored {
+			continue
+		}
+		outOf++
+		switch a.Verdict {
+		case Hallucinated:
+			hallucinated++
+		case Abstained:
+			abstained++
+		}
+	}
+	return
+}
+
+// failures counts arms that errored or timed out before answering.
 func failures(rs []QuestionResult, arm Arm) int {
 	n := 0
 	for _, r := range rs {
-		if armVerdict(r, arm) == Failed {
+		if armOf(r, arm).Verdict == Failed {
 			n++
 		}
 	}
@@ -171,7 +210,7 @@ func totals(rs []QuestionResult) (raw, hdf, adhoc int) {
 
 func frac(n, d int) string {
 	if d == 0 {
-		return "-"
+		return "n/a"
 	}
 	return fmt.Sprintf("%d/%d (%d%%)", n, d, n*100/d)
 }
