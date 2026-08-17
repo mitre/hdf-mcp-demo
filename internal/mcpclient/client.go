@@ -54,6 +54,35 @@ func (s *Session) Call(ctx context.Context, name string, args map[string]any) (s
 	return string(b), nil
 }
 
+// ToolDef is a tool the server advertises: name, description, and its input
+// JSON-Schema (as a generic map, ready to hand to a model as a function schema).
+type ToolDef struct {
+	Name        string
+	Description string
+	InputSchema map[string]any
+}
+
+// ListTools returns the server's advertised tools (tools/list) — used to hand a
+// model the real HDF tool schemas for the HDF arm of the study.
+func (s *Session) ListTools(ctx context.Context) ([]ToolDef, error) {
+	res, err := s.cs.ListTools(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("tools/list: %w", err)
+	}
+	defs := make([]ToolDef, 0, len(res.Tools))
+	for _, t := range res.Tools {
+		schema := map[string]any{}
+		if t.InputSchema != nil {
+			b, mErr := json.Marshal(t.InputSchema)
+			if mErr == nil {
+				_ = json.Unmarshal(b, &schema)
+			}
+		}
+		defs = append(defs, ToolDef{Name: t.Name, Description: t.Description, InputSchema: schema})
+	}
+	return defs, nil
+}
+
 // Close shuts down the session and terminates the spawned process.
 func (s *Session) Close() error { return s.cs.Close() }
 
