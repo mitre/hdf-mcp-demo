@@ -8,7 +8,15 @@
 //
 // It is deliberately honest: the HDF arm's prompt tokens already include the
 // tool-schema tax (the tool definitions ride in every request), grading favors
-// abstention over false credit, and Class B is scored bidirectionally.
+// abstention over false credit, Class B is scored bidirectionally, and an arm
+// that errors or times out (e.g. a raw scan too large to fit context) is recorded
+// as a `failed` outcome rather than crashing the run.
+//
+// Questions run concurrently within a model (bounded by Options.Concurrency); a
+// shared MCP session is safe because mcpclient.Session serializes tool calls.
+// Models are still iterated serially by the caller — concurrent model *loads*
+// thrash a memory-constrained gateway, unlike concurrent questions against one
+// already-loaded model.
 package benchmark
 
 import (
@@ -16,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/mitre/hdf-mcp-demo/internal/agent"
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
@@ -31,9 +40,10 @@ const DefaultSystem = "You are a security analyst. Use the available tools to ge
 
 // Options controls a run.
 type Options struct {
-	MaxIters int    // tool round-trip cap per arm (default 6)
-	System   string // system prompt (default DefaultSystem)
-	AdHoc    bool   // also measure the conversion-included HDF cost view
+	MaxIters    int    // tool round-trip cap per arm (default 6)
+	System      string // system prompt (default DefaultSystem)
+	AdHoc       bool   // also measure the conversion-included HDF cost view
+	Concurrency int    // max questions in flight at once (default 1 = serial)
 }
 
 func (o Options) maxIters() int {
@@ -50,11 +60,20 @@ func (o Options) system() string {
 	return DefaultSystem
 }
 
-// ArmResult is one arm's answer plus its graded verdict and real cost.
+func (o Options) concurrency() int {
+	if o.Concurrency > 1 {
+		return o.Concurrency
+	}
+	return 1
+}
+
+// ArmResult is one arm's answer plus its graded verdict and real cost. Err is set
+// (and Verdict is Failed) when the arm errored or timed out before answering.
 type ArmResult struct {
 	Arm     Arm
 	Answer  string
 	Verdict Verdict
+	Err     string
 	Cost    agent.Result
 }
 
@@ -82,9 +101,9 @@ func adHocTools() map[string]bool {
 
 // Run executes the study for every question in bank against one model. sess must
 // be connected with writes enabled (HDF_MCP_ENABLE_WRITES=1) and HDF_MCP_ROOT set
-// to root; fixturesDir holds the raw fixtures. The pipeline HDF arm reads
-// documents this function pre-converts; the ad-hoc arm converts them itself in a
-// separate root so its cost includes the conversion round-trip.
+// to root; fixturesDir holds the raw fixtures. Questions are graded concurrently
+// (bounded by Options.Concurrency); a per-question/arm failure is recorded, never
+// fatal. Only setup errors (staging/conversion) abort.
 func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Session, fixturesDir, root string, bank []Question, opts Options) ([]QuestionResult, error) {
 	rawBytes, err := stageAndConvert(ctx, sess, fixturesDir, root, bank)
 	if err != nil {
@@ -96,79 +115,84 @@ func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Sessio
 	if err != nil {
 		return nil, fmt.Errorf("build hdf toolbox: %w", err)
 	}
-
 	var adHocTB *agent.MCPToolBox
-	var adHocRoot string
 	if opts.AdHoc {
-		adHocTB, err = agent.NewMCPToolBox(ctx, sess, adHocTools())
-		if err != nil {
+		if adHocTB, err = agent.NewMCPToolBox(ctx, sess, adHocTools()); err != nil {
 			return nil, fmt.Errorf("build ad-hoc toolbox: %w", err)
 		}
 	}
 
-	var out []QuestionResult
-	for _, q := range bank {
-		hdfDoc, err := os.ReadFile(filepath.Join(root, q.HDFName))
-		if err != nil {
-			return nil, fmt.Errorf("read converted %s: %w", q.HDFName, err)
-		}
-		cls, err := truth.Classify(q.Truth, rawBytes[q.Fixture], hdfDoc)
-		if err != nil {
-			return nil, err
-		}
-
-		qr := QuestionResult{ID: q.ID, Ask: q.Ask, Class: cls.Class, RawView: cls.RawAnswer, HDFView: cls.HDFAnswer}
-
-		rawKey := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw)
-		qr.Raw, err = runArm(ctx, inst, rawTB, ArmRaw, opts,
-			q.Ask+" The scan file is named "+q.Fixture+".", rawKey, q.Kind)
-		if err != nil {
-			return nil, fmt.Errorf("[%s] raw arm: %w", q.ID, err)
-		}
-
-		hdfKey := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmHDF)
-		qr.HDF, err = runArm(ctx, inst, mcpTB, ArmHDF, opts,
-			q.Ask+" The HDF document is named "+q.HDFName+".", hdfKey, q.Kind)
-		if err != nil {
-			return nil, fmt.Errorf("[%s] hdf arm: %w", q.ID, err)
-		}
-
-		if opts.AdHoc {
-			if adHocRoot == "" {
-				if adHocRoot, err = os.MkdirTemp("", "hdf-mcp-demo-adhoc-"); err != nil {
-					return nil, err
-				}
-				defer os.RemoveAll(adHocRoot)
-			}
-			// Stage only the raw file; the agent must convert it itself.
-			if err := os.WriteFile(filepath.Join(root, q.Fixture), rawBytes[q.Fixture], 0o600); err != nil {
-				return nil, err
-			}
-			ah, err := runArm(ctx, inst, adHocTB, ArmHDF, opts,
-				fmt.Sprintf("%s The raw scan file is named %s. First convert it to HDF using hdf_convert with from=%s and output=%s, then analyze that HDF document.",
-					q.Ask, q.Fixture, q.From, q.HDFName), hdfKey, q.Kind)
-			if err != nil {
-				return nil, fmt.Errorf("[%s] ad-hoc arm: %w", q.ID, err)
-			}
-			qr.HDFAdHoc = &ah
-		}
-
-		out = append(out, qr)
+	results := make([]QuestionResult, len(bank))
+	errs := make([]error, len(bank))
+	sem := make(chan struct{}, opts.concurrency())
+	var wg sync.WaitGroup
+	for i, q := range bank {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, q Question) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			qr, qerr := runQuestion(ctx, inst, rawTB, mcpTB, adHocTB, root, rawBytes[q.Fixture], q, opts)
+			results[i], errs[i] = qr, qerr
+		}(i, q)
 	}
-	return out, nil
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			return nil, fmt.Errorf("[%s] %w", bank[i].ID, e)
+		}
+	}
+	return results, nil
 }
 
-// runArm runs one agent arm and grades its answer.
-func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind) (ArmResult, error) {
+// runQuestion classifies one question and runs its arms. Arm failures become
+// recorded outcomes; only a setup error (reading the converted doc, classifying)
+// is returned as fatal.
+func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB agent.ToolBox, adHocTB *agent.MCPToolBox, root string, raw []byte, q Question, opts Options) (QuestionResult, error) {
+	hdfDoc, err := os.ReadFile(filepath.Join(root, q.HDFName))
+	if err != nil {
+		return QuestionResult{}, fmt.Errorf("read converted %s: %w", q.HDFName, err)
+	}
+	cls, err := truth.Classify(q.Truth, raw, hdfDoc)
+	if err != nil {
+		return QuestionResult{}, err
+	}
+
+	qr := QuestionResult{ID: q.ID, Ask: q.Ask, Class: cls.Class, RawView: cls.RawAnswer, HDFView: cls.HDFAnswer}
+	qr.Raw = runArm(ctx, inst, rawTB, ArmRaw, opts,
+		q.Ask+" The scan file is named "+q.Fixture+".",
+		q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw), q.Kind)
+	hdfKey := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmHDF)
+	qr.HDF = runArm(ctx, inst, mcpTB, ArmHDF, opts,
+		q.Ask+" The HDF document is named "+q.HDFName+".", hdfKey, q.Kind)
+
+	if adHocTB != nil {
+		// A per-question output name keeps concurrent ad-hoc conversions from
+		// colliding in the shared root. The raw file is already staged.
+		out := q.ID + ".adhoc.hdf.json"
+		ah := runArm(ctx, inst, adHocTB, ArmHDF, opts,
+			fmt.Sprintf("%s The raw scan file is named %s. First convert it to HDF using hdf_convert with from=%s and output=%s, then analyze that HDF document.",
+				q.Ask, q.Fixture, q.From, out), hdfKey, q.Kind)
+		qr.HDFAdHoc = &ah
+	}
+	return qr, nil
+}
+
+// runArm runs one agent arm and grades its answer. An error (including a timeout)
+// is captured as a Failed outcome with whatever tokens were spent — never
+// propagated, so one over-context arm can't sink the whole run.
+func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind) ArmResult {
 	res, err := agent.Run(ctx, inst, tb, opts.system(), prompt, opts.maxIters())
 	if err != nil {
-		return ArmResult{}, err
+		return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Failed, Err: err.Error(), Cost: res}
 	}
-	return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Grade(res.Answer, key, kind), Cost: res}, nil
+	return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Grade(res.Answer, key, kind), Cost: res}
 }
 
 // stageAndConvert copies each referenced raw fixture under root and normalizes it
-// to HDF via the MCP hdf_convert tool. It returns the raw bytes by filename.
+// to HDF via the MCP hdf_convert tool. It returns the raw bytes by filename. Runs
+// once, serially, before the concurrent phase.
 func stageAndConvert(ctx context.Context, sess *mcpclient.Session, fixturesDir, root string, bank []Question) (map[string][]byte, error) {
 	raw := map[string][]byte{}
 	for _, q := range bank {

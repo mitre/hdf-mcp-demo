@@ -54,6 +54,13 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	rc, hc := correct(results, ArmRaw), correct(results, ArmHDF)
 	fmt.Fprintf(&b, "%-30s %-12s %-12s\n", "ALL", frac(rc, len(results)), frac(hc, len(results)))
 
+	// Surface failed arms (errored/over-context/timeout) explicitly — they count
+	// against accuracy and are easy to miss in the verdict column.
+	if rf, hf := failures(results, ArmRaw), failures(results, ArmHDF); rf > 0 || hf > 0 {
+		fmt.Fprintf(&b, "%-30s %-12s %-12s   (errored/over-context/timeout)\n", "  of which failed",
+			fmt.Sprintf("%d", rf), fmt.Sprintf("%d", hf))
+	}
+
 	// Cost views.
 	rawTok, hdfTok, adhocTok := totals(results)
 	b.WriteString("\ntoken cost (real prompt+completion usage, tool-schema tax included):\n")
@@ -88,6 +95,11 @@ func footer(adHoc bool) string {
 		"  - Cost is real endpoint token usage; the hdf-mcp prompt tokens already include",
 		"    the tool-schema tax. Small scans can make HDF cost MORE — that is expected and",
 		"    is the point of measuring rather than assuming.",
+		"  - A 'failed' arm errored or timed out before answering (commonly a raw scan too",
+		"    large to fit context); it counts against that arm's accuracy. The raw arm uses",
+		"    grep + paginated reads with NO format hints, so it must discover the schema and",
+		"    choose what to search for — the real cost of raw work without HDF's normalized",
+		"    shape. A whole-file read is refused above a size cap.",
 		"  - N is small and a single run is noisy; treat as directional, not definitive.",
 	}
 	if adHoc {
@@ -119,14 +131,27 @@ func filterClass(rs []QuestionResult, c truth.Class) []QuestionResult {
 	return out
 }
 
+func armVerdict(r QuestionResult, arm Arm) Verdict {
+	if arm == ArmHDF {
+		return r.HDF.Verdict
+	}
+	return r.Raw.Verdict
+}
+
 func correct(rs []QuestionResult, arm Arm) int {
 	n := 0
 	for _, r := range rs {
-		v := r.Raw.Verdict
-		if arm == ArmHDF {
-			v = r.HDF.Verdict
+		if armVerdict(r, arm) == Correct {
+			n++
 		}
-		if v == Correct {
+	}
+	return n
+}
+
+func failures(rs []QuestionResult, arm Arm) int {
+	n := 0
+	for _, r := range rs {
+		if armVerdict(r, arm) == Failed {
 			n++
 		}
 	}

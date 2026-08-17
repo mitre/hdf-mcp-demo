@@ -10,7 +10,11 @@
 //	export OPENAI_MODEL_LIST="gemma-4,gpt-oss-120b"   # or OPENAI_MODEL=<one>
 //	export OPENAI_API_KEY=<key>                        # if the gateway requires it
 //	export HDF_BIN=/path/to/hdf                        # or put hdf on PATH
-//	go run ./cmd/benchmark [-adhoc] [-maxiters 6] [-fixtures ./fixtures]
+//	go run ./cmd/benchmark [-adhoc] [-concurrency 4] [-maxtokens 1024] \
+//	    [-models gemma-4] [-timeout 90m] [-model-timeout 25m] [-maxiters 6]
+//
+// Questions run concurrently within a model (the far-side gateway batches them);
+// models are iterated serially to avoid thrashing a memory-constrained backend.
 package main
 
 import (
@@ -19,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/mitre/hdf-mcp-demo/internal/benchmark"
@@ -30,20 +35,52 @@ func main() {
 	fixturesDir := flag.String("fixtures", "fixtures", "directory holding the raw source fixtures")
 	adhoc := flag.Bool("adhoc", false, "also measure the conversion-included (ad-hoc) HDF cost view")
 	maxIters := flag.Int("maxiters", 6, "tool round-trip cap per arm")
-	timeout := flag.Duration("timeout", 30*time.Minute, "overall run timeout (raise for slow reasoning models)")
+	maxTokens := flag.Int("maxtokens", 1024, "per-request completion-token cap; RAISE for reasoning models (they spend tokens on hidden reasoning before the answer)")
+	concurrency := flag.Int("concurrency", 4, "max questions in flight at once per model (server-side batched; keep models serial)")
+	modelsFlag := flag.String("models", "", "comma-separated models to run; overrides OPENAI_MODEL_LIST/OPENAI_MODEL when set")
+	timeout := flag.Duration("timeout", 30*time.Minute, "overall run timeout for the whole invocation (raise when a slow/cold reasoning model is in the list)")
+	perModel := flag.Duration("model-timeout", 0, "optional per-model timeout; 0 = share the overall -timeout across all models")
 	flag.Parse()
 
-	if err := run(*fixturesDir, *adhoc, *maxIters, *timeout); err != nil {
+	cfg := runConfig{
+		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
+		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
+	}
+	if err := run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(fixturesDir string, adhoc bool, maxIters int, timeout time.Duration) error {
+type runConfig struct {
+	fixturesDir       string
+	adhoc             bool
+	maxIters          int
+	maxTokens         int
+	concurrency       int
+	models            []string
+	timeout, perModel time.Duration
+}
+
+// splitModels parses the comma-separated -models flag, trimming blanks.
+func splitModels(s string) []string {
+	var out []string
+	for _, m := range strings.Split(s, ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func run(cfg runConfig) error {
 	base := os.Getenv("OPENAI_BASE_URL")
-	models := instrument.ModelsFromEnv()
+	models := cfg.models
+	if len(models) == 0 {
+		models = instrument.ModelsFromEnv()
+	}
 	if base == "" || len(models) == 0 {
-		return fmt.Errorf("set OPENAI_BASE_URL and OPENAI_MODEL or OPENAI_MODEL_LIST (and OPENAI_API_KEY if required)")
+		return fmt.Errorf("set OPENAI_BASE_URL and OPENAI_MODEL or OPENAI_MODEL_LIST (or pass -models); and OPENAI_API_KEY if required")
 	}
 	bin, err := locateHDF()
 	if err != nil {
@@ -56,7 +93,7 @@ func run(fixturesDir string, adhoc bool, maxIters int, timeout time.Duration) er
 	}
 	defer os.RemoveAll(root)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
 	defer cancel()
 
 	env := append(os.Environ(), "HDF_MCP_ROOT="+root, "HDF_MCP_ENABLE_WRITES=1")
@@ -67,20 +104,38 @@ func run(fixturesDir string, adhoc bool, maxIters int, timeout time.Duration) er
 	defer func() { _ = sess.Close() }()
 
 	bank := benchmark.Bank()
-	opts := benchmark.Options{MaxIters: maxIters, AdHoc: adhoc}
+	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency}
 
-	fmt.Printf("endpoint: %s   hdf: %s   questions: %d   ad-hoc view: %v\n\n", base, bin, len(bank), adhoc)
+	// Echo exactly what will run — catches a stale OPENAI_MODEL_LIST silently
+	// overriding an intended single model.
+	fmt.Printf("endpoint: %s   hdf: %s\nmodels: %s   questions: %d   concurrency: %d   ad-hoc: %v\n\n",
+		base, bin, strings.Join(models, ", "), len(bank), cfg.concurrency, cfg.adhoc)
+
+	succeeded := 0
 	for _, model := range models {
 		inst := instrument.NewOpenAI(base, model, os.Getenv("OPENAI_API_KEY"))
-		inst.MaxTokens = 1024 // generous enough for a reasoning model to finish
+		inst.MaxTokens = cfg.maxTokens
 
-		results, err := benchmark.Run(ctx, inst, sess, fixturesDir, root, bank, opts)
+		// A per-model timeout (if set) isolates a slow/cold model so it can't spend
+		// the whole budget and starve the rest; a failure is reported and skipped
+		// rather than aborting the run.
+		mctx, mcancel := ctx, func() {}
+		if cfg.perModel > 0 {
+			mctx, mcancel = context.WithTimeout(ctx, cfg.perModel)
+		}
+		results, err := benchmark.Run(mctx, inst, sess, cfg.fixturesDir, root, bank, opts)
+		mcancel()
 		if err != nil {
-			return fmt.Errorf("model %s: %w", model, err)
+			fmt.Fprintf(os.Stderr, "model %s failed (skipped): %v\n\n", model, err)
+			continue
 		}
 		benchmark.SortByID(results)
-		fmt.Println(benchmark.Render(inst.Name(), results, adhoc))
+		fmt.Println(benchmark.Render(inst.Name(), results, cfg.adhoc))
 		fmt.Println()
+		succeeded++
+	}
+	if succeeded == 0 {
+		return fmt.Errorf("no model completed the study (see per-model errors above)")
 	}
 	return nil
 }

@@ -11,13 +11,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sync"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Session is a connected MCP client over a spawned `hdf mcp` process.
+// Session is a connected MCP client over a spawned `hdf mcp` process. Call is
+// mutex-guarded so concurrent arms (the parallel benchmark) can share one session
+// safely; tool calls are fast local library work, so serializing them is cheap
+// while the slow model calls that bracket them still run concurrently.
 type Session struct {
 	cs *sdkmcp.ClientSession
+	mu sync.Mutex
 }
 
 // Connect spawns `binary mcp` and connects an MCP client over its stdio. env
@@ -40,6 +45,8 @@ func Connect(ctx context.Context, binary string, env []string) (*Session, error)
 // bytes an agent's context actually receives, and what the demo tokenizes. It
 // returns an error on an isError tool result.
 func (s *Session) Call(ctx context.Context, name string, args map[string]any) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	res, err := s.cs.CallTool(ctx, &sdkmcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		return "", err

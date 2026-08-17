@@ -22,6 +22,7 @@ const (
 	Correct   Verdict = "correct"   // extracted answer matches the key
 	Wrong     Verdict = "wrong"     // extracted a concrete answer, but not the key
 	Abstained Verdict = "abstained" // declined / no extractable answer
+	Failed    Verdict = "failed"    // the arm errored or timed out (e.g. over-context) before answering
 )
 
 // Grading is intentionally lenient and therefore imperfect: it parses a final

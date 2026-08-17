@@ -96,7 +96,8 @@ func TestBenchmark_Pipeline(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	results, err := Run(context.Background(), stubInstrument{}, sess, "../../fixtures", root, Bank(), Options{MaxIters: 4})
+	// Concurrency > 1 exercises the parallel path and the shared-session mutex.
+	results, err := Run(context.Background(), stubInstrument{}, sess, "../../fixtures", root, Bank(), Options{MaxIters: 4, Concurrency: 3})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
