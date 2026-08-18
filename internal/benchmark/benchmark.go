@@ -49,6 +49,9 @@ type Options struct {
 	AdHoc       bool   // also measure the conversion-included HDF cost view
 	Concurrency int    // max questions in flight at once (default 1 = serial)
 	Repeat      int    // runs per arm (default 1); >1 yields accuracy rates and cost variance
+	// Progress, if set, is called once per question as it completes (serialized, so
+	// the callback need not be thread-safe) — for liveness during a long run.
+	Progress func(model, questionID string, done, total int)
 }
 
 func (o Options) repeat() int {
@@ -146,6 +149,8 @@ func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Sessio
 	errs := make([]error, len(bank))
 	sem := make(chan struct{}, opts.concurrency())
 	var wg sync.WaitGroup
+	var pmu sync.Mutex
+	done := 0
 	for i, q := range bank {
 		wg.Add(1)
 		sem <- struct{}{}
@@ -154,6 +159,12 @@ func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Sessio
 			defer func() { <-sem }()
 			qr, qerr := runQuestion(ctx, inst, rawTB, mcpTB, adHocTB, root, rawBytes, q, opts)
 			results[i], errs[i] = qr, qerr
+			if opts.Progress != nil {
+				pmu.Lock()
+				done++
+				opts.Progress(inst.Name(), q.ID, done, len(bank))
+				pmu.Unlock()
+			}
 		}(i, q)
 	}
 	wg.Wait()

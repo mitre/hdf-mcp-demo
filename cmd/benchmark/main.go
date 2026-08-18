@@ -323,6 +323,11 @@ func run(cfg runConfig) error {
 
 	bank := benchmark.Bank()
 	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency, Repeat: cfg.repeat}
+	// Liveness: report each question as it finishes (to stderr, so stdout stays
+	// clean for -format json/markdown), so a long run visibly isn't hung.
+	opts.Progress = func(model, qID string, done, total int) {
+		fmt.Fprintf(os.Stderr, "  [%d/%d] %s  %s\n", done, total, model, qID)
+	}
 
 	// Echo exactly what will run (to stderr, so stdout stays clean for json/markdown)
 	// — catches a stale OPENAI_MODEL_LIST silently overriding an intended single model.
@@ -343,8 +348,11 @@ func run(cfg runConfig) error {
 		fmt.Println(benchmark.MetaText(meta))
 	}
 	var runs []benchmark.ModelRun
-	for _, model := range models {
+	for mi, model := range models {
 		inst := buildInstrument(cfg, base, model)
+		fmt.Fprintf(os.Stderr, "[model %d/%d] %s — running %d questions (x%d)...\n",
+			mi+1, len(models), inst.Name(), len(bank), opts.Repeat)
+		start := time.Now()
 
 		// A per-model timeout (if set) isolates a slow/cold model so it can't spend
 		// the whole budget and starve the rest; a failure is reported and skipped
@@ -356,16 +364,17 @@ func run(cfg runConfig) error {
 		results, err := runModel(mctx, cfg, bin, baseRoot, model, inst, bank, opts)
 		mcancel()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "model %s failed (skipped): %v\n\n", model, err)
+			fmt.Fprintf(os.Stderr, "[model %d/%d] %s FAILED after %s (skipped): %v\n\n",
+				mi+1, len(models), inst.Name(), time.Since(start).Round(time.Second), err)
 			continue
 		}
+		fmt.Fprintf(os.Stderr, "[model %d/%d] %s done in %s\n\n",
+			mi+1, len(models), inst.Name(), time.Since(start).Round(time.Second))
 		benchmark.SortByID(results)
 		runs = append(runs, benchmark.ModelRun{Model: inst.Name(), Results: results})
 		if incremental {
 			fmt.Println(benchmark.Render(inst.Name(), results, cfg.adhoc))
 			fmt.Println()
-		} else {
-			fmt.Fprintf(os.Stderr, "  %s done (%d questions)\n", inst.Name(), len(results))
 		}
 	}
 	if len(runs) == 0 {
