@@ -4,3 +4,6 @@
 *.test
 *.out
 coverage*
+
+# Benchmark result artifacts written by bench.sh
+results/

@@ -79,3 +79,42 @@ func TestOllama_OptionsSent(t *testing.T) {
 		t.Errorf("temperature = %v, want 0", opts["temperature"])
 	}
 }
+
+// TestOllama_NumCtxSent verifies num_ctx reaches the request when set, and is
+// absent when left at 0 — the difference between a run the raw-file arm can
+// actually fit in and one Ollama silently truncates to its 4096 default.
+func TestOllama_NumCtxSent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		numCtx int
+		want   any // nil = key must be absent
+	}{
+		{"set", 32768, float64(32768)},
+		{"unset defers to server", 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&got)
+				_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"prompt_eval_count":1,"eval_count":1}`))
+			}))
+			defer srv.Close()
+
+			o := NewOllama(srv.URL, "test-model")
+			o.NumCtx = tc.numCtx
+			if _, err := o.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			opts, _ := got["options"].(map[string]any)
+			if tc.want == nil {
+				if _, present := opts["num_ctx"]; present {
+					t.Errorf("num_ctx = %v, want absent", opts["num_ctx"])
+				}
+				return
+			}
+			if opts["num_ctx"] != tc.want {
+				t.Errorf("num_ctx = %v, want %v", opts["num_ctx"], tc.want)
+			}
+		})
+	}
+}

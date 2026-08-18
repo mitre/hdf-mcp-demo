@@ -13,12 +13,18 @@ import (
 const DefaultOllamaURL = "http://127.0.0.1:11434"
 
 // Ollama is a native Ollama /api/chat instrument — fully local inference, so it
-// cannot incur a charge. Requires a tool-calling-capable pulled model (qwen2.5,
-// llama3.1/3.2, mistral-nemo, …).
+// cannot incur a charge. Requires a tool-calling-capable pulled model (llama3.2,
+// granite4.1, gpt-oss, gemma4, …).
 type Ollama struct {
-	BaseURL     string
-	Model       string
-	NumPredict  int      // completion-token cap (Ollama's num_predict); 0 = model default
+	BaseURL    string
+	Model      string
+	NumPredict int // completion-token cap (Ollama's num_predict); 0 = model default
+	// NumCtx is the context window (Ollama's num_ctx). 0 leaves it to the server,
+	// whose default is only 4096 regardless of the model's advertised capacity —
+	// far below what the raw-file arm needs, and Ollama truncates silently rather
+	// than erroring, so an unset value quietly understates the raw arm. Always set
+	// it for a benchmark run.
+	NumCtx      int
 	Temperature *float64 // when non-nil, sampling temperature (0 = deterministic)
 	HTTP        *http.Client
 }
@@ -39,6 +45,9 @@ func (o *Ollama) options() map[string]any {
 	m := map[string]any{}
 	if o.NumPredict > 0 {
 		m["num_predict"] = o.NumPredict
+	}
+	if o.NumCtx > 0 {
+		m["num_ctx"] = o.NumCtx
 	}
 	if o.Temperature != nil {
 		m["temperature"] = *o.Temperature
@@ -110,8 +119,29 @@ func (o *Ollama) Chat(ctx context.Context, msgs []Message, tools []Tool) (Result
 	}, nil
 }
 
-// ListModels returns locally-pulled model names (GET /api/tags).
-func (o *Ollama) ListModels(ctx context.Context) ([]string, error) {
+// LocalModel describes one locally-pulled Ollama model, including the capability
+// list the server reports. Tool calling is a per-model property — a model without
+// it cannot drive either arm of the study — so it is worth checking before a run
+// rather than discovering it as a mid-run loop failure.
+type LocalModel struct {
+	Name          string
+	ParameterSize string
+	Capabilities  []string
+}
+
+// HasTools reports whether the model advertises tool-calling support.
+func (m LocalModel) HasTools() bool {
+	for _, c := range m.Capabilities {
+		if c == "tools" {
+			return true
+		}
+	}
+	return false
+}
+
+// LocalModels returns the locally-pulled models with their capabilities
+// (GET /api/tags).
+func (o *Ollama) LocalModels(ctx context.Context) ([]LocalModel, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.BaseURL+"/api/tags", nil)
 	if err != nil {
 		return nil, err
@@ -121,16 +151,36 @@ func (o *Ollama) ListModels(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("ollama tags (is `ollama serve` running at %s?): %w", o.BaseURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama tags returned %s", resp.Status)
+	}
 	var body struct {
 		Models []struct {
-			Name string `json:"name"`
+			Name         string   `json:"name"`
+			Capabilities []string `json:"capabilities"`
+			Details      struct {
+				ParameterSize string `json:"parameter_size"`
+			} `json:"details"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(body.Models))
+	out := make([]LocalModel, 0, len(body.Models))
 	for _, m := range body.Models {
+		out = append(out, LocalModel{Name: m.Name, ParameterSize: m.Details.ParameterSize, Capabilities: m.Capabilities})
+	}
+	return out, nil
+}
+
+// ListModels returns locally-pulled model names (GET /api/tags).
+func (o *Ollama) ListModels(ctx context.Context) ([]string, error) {
+	models, err := o.LocalModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(models))
+	for _, m := range models {
 		names = append(names, m.Name)
 	}
 	return names, nil
