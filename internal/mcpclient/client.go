@@ -16,13 +16,54 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// stderrTail is how many bytes of the server's stderr to retain. The server logs
+// to stderr by contract (stdout carries JSON-RPC), and without capturing it a
+// crashed server is indistinguishable from any other transport EOF — the client
+// just reports "connection closed" and the actual cause is lost.
+const stderrTail = 8 << 10
+
+// ringWriter keeps only the last n bytes written to it, so a chatty server
+// cannot grow the buffer without bound over a long run.
+type ringWriter struct {
+	mu  sync.Mutex
+	buf []byte
+	n   int
+}
+
+func (w *ringWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	if len(w.buf) > w.n {
+		w.buf = w.buf[len(w.buf)-w.n:]
+	}
+	return len(p), nil
+}
+
+func (w *ringWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.buf)
+}
+
 // Session is a connected MCP client over a spawned `hdf mcp` process. Call is
 // mutex-guarded so concurrent arms (the parallel benchmark) can share one session
 // safely; tool calls are fast local library work, so serializing them is cheap
 // while the slow model calls that bracket them still run concurrently.
 type Session struct {
-	cs *sdkmcp.ClientSession
-	mu sync.Mutex
+	cs     *sdkmcp.ClientSession
+	mu     sync.Mutex
+	errLog *ringWriter
+}
+
+// ServerLog returns the tail of the server's stderr. It is the first thing to
+// look at when a call fails with a transport error: an EOF means the process is
+// gone, and its dying words are here.
+func (s *Session) ServerLog() string {
+	if s.errLog == nil {
+		return ""
+	}
+	return s.errLog.String()
 }
 
 // Connect spawns `binary mcp` and connects an MCP client over its stdio. env
@@ -33,12 +74,14 @@ func Connect(ctx context.Context, binary string, env []string) (*Session, error)
 	if env != nil {
 		cmd.Env = env
 	}
+	errLog := &ringWriter{n: stderrTail}
+	cmd.Stderr = errLog
 	c := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "hdf-mcp-demo", Version: "0.1.0"}, nil)
 	cs, err := c.Connect(ctx, &sdkmcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %q mcp over stdio: %w", binary, err)
 	}
-	return &Session{cs: cs}, nil
+	return &Session{cs: cs, errLog: errLog}, nil
 }
 
 // Call invokes a tool and returns its structured content as compact JSON — the
