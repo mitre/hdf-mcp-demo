@@ -17,7 +17,7 @@ func TestClassOf(t *testing.T) {
 		{"disagree -> B", Answered("7"), Answered("3"), ClassB},
 		{"raw cannot answer -> C", Unanswerable(), Answered("40"), ClassC},
 		{"both cannot answer -> B", Unanswerable(), Unanswerable(), ClassB},
-		{"hdf cannot answer -> B", Answered("7"), Unanswerable(), ClassB},
+		{"hdf cannot answer -> D", Answered("7"), Unanswerable(), ClassD},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -54,6 +54,20 @@ func TestRawParsers(t *testing.T) {
 	if a, _ := GrypeCVEPresent("CVE-9999-0000")(grype); a.Value != "false" {
 		t.Errorf("GrypeCVEPresent(absent) = %+v; want false", a)
 	}
+	if a, _ := GrypeSeverityPresent("Critical")(grype); a.Value != "true" {
+		t.Errorf("GrypeSeverityPresent(Critical) = %+v; want true", a)
+	}
+	if a, _ := GrypeSeverityPresent("Nope")(grype); a.Value != "false" {
+		t.Errorf("GrypeSeverityPresent(absent) = %+v; want false", a)
+	}
+
+	zap := []byte(`{"site":[{"alerts":[{"riskcode":"3"},{"riskcode":"1"}]},{"alerts":[{"riskcode":"3"},{"riskcode":"0"}]}]}`)
+	if a, err := ZapAlertCount(zap); err != nil || a.Value != "4" {
+		t.Errorf("ZapAlertCount = %+v, err %v; want 4", a, err)
+	}
+	if a, _ := ZapHighCount(zap); a.Value != "2" {
+		t.Errorf("ZapHighCount = %+v; want 2", a)
+	}
 }
 
 // The HDF-view parsers, on a small hand-built document (two rules, one deduped
@@ -78,6 +92,16 @@ func TestHDFParsers(t *testing.T) {
 	// 1 passed of 3 total results -> 33%.
 	if a, err := HDFComplianceRate(doc); err != nil || a.Value != "33" {
 		t.Errorf("HDFComplianceRate = %+v, err %v; want 33", a, err)
+	}
+	// impacts in doc: 0.9 and 0.5.
+	if a, _ := HDFImpactCountAtLeast(0.7)(doc); a.Value != "1" {
+		t.Errorf("HDFImpactCountAtLeast(0.7) = %+v; want 1", a)
+	}
+	if a, _ := HDFImpactPresentAtLeast(0.9)(doc); a.Value != "true" {
+		t.Errorf("HDFImpactPresentAtLeast(0.9) = %+v; want true", a)
+	}
+	if a, _ := HDFImpactPresentAtLeast(0.95)(doc); a.Value != "false" {
+		t.Errorf("HDFImpactPresentAtLeast(0.95) = %+v; want false", a)
 	}
 }
 

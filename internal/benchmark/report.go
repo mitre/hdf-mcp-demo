@@ -40,7 +40,7 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	b.WriteString("\naccuracy by type (correct / questions the arm can answer):\n")
 	fmt.Fprintf(&b, "%-26s %-12s %-12s\n", "type", "raw-file", "hdf-mcp")
 	b.WriteString(strings.Repeat("-", 50) + "\n")
-	for _, c := range []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC} {
+	for _, c := range allClasses {
 		sub := filterClass(results, c)
 		if len(sub) == 0 {
 			continue
@@ -58,6 +58,10 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	// scored. Frequent hallucination here is itself a point FOR HDF.)
 	if hall, abst, outOf := remit(results, ArmRaw); outOf > 0 {
 		fmt.Fprintf(&b, "\nraw-file arm on hdf-only questions (out of remit, not scored): %d hallucinated / %d abstained of %d\n",
+			hall, abst, outOf)
+	}
+	if hall, abst, outOf := remit(results, ArmHDF); outOf > 0 {
+		fmt.Fprintf(&b, "hdf-mcp arm on raw-only questions (out of remit, not scored): %d hallucinated / %d abstained of %d\n",
 			hall, abst, outOf)
 	}
 
@@ -88,6 +92,8 @@ func typeLabel(c truth.Class) string {
 		return "objective"
 	case truth.ClassB:
 		return "interpretive"
+	case truth.ClassD:
+		return "raw-only"
 	default:
 		return "hdf-only"
 	}
@@ -100,10 +106,15 @@ func classRowLabel(c truth.Class) string {
 		return "objective (shared fact)"
 	case truth.ClassB:
 		return "interpretive (to intent)"
+	case truth.ClassD:
+		return "raw-only (hdf n/a)"
 	default:
 		return "hdf-only (raw n/a)"
 	}
 }
+
+// allClasses is the display order for the accuracy tables.
+var allClasses = []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC, truth.ClassD}
 
 func footer(adHoc bool) string {
 	lines := []string{
@@ -113,9 +124,11 @@ func footer(adHoc bool) string {
 		"    answer both arms should reach. 'interpretive': the fair answer depends on the",
 		"    question's intent, graded bidirectionally (e.g. distinct rule violations vs raw",
 		"    finding volume). 'hdf-only': raw scanners can't natively express it (compliance",
-		"    %, effective status) — the raw arm is out of remit and not scored on these.",
-		"  - Accuracy is scored only over questions an arm can answer. On hdf-only questions",
-		"    the raw arm's hallucinate-vs-abstain is reported separately, not as a failure.",
+		"    %, effective status) — the raw arm is out of remit. 'raw-only': a tool-specific",
+		"    field HDF drops — the hdf arm is out of remit (rare; these converters are",
+		"    near-lossless, so a genuine raw-only question is hard to construct here).",
+		"  - Accuracy is scored only over questions an arm can answer. Out-of-remit arms",
+		"    report hallucinate-vs-abstain separately, not as a failure.",
 		"  - Grading parses an 'ANSWER: <value>' line; a correct answer buried in prose",
 		"    without that line may read as abstained. Grading favors abstention over false",
 		"    credit. No LLM judge is used.",

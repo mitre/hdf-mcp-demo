@@ -92,6 +92,41 @@ func HDFComplianceRate(b []byte) (Answer, error) {
 	return Answered(strconv.Itoa(passed * 100 / total)), nil
 }
 
+// HDFImpactCountAtLeast counts requirements whose impact is at least threshold —
+// the normalized-severity analogue of a raw scanner's high-severity count.
+func HDFImpactCountAtLeast(threshold float64) func([]byte) (Answer, error) {
+	return func(b []byte) (Answer, error) {
+		d, err := parseHDF(b)
+		if err != nil {
+			return Answer{}, err
+		}
+		n := 0
+		for _, r := range hdfRequirements(d) {
+			if r.Impact >= threshold {
+				n++
+			}
+		}
+		return Answered(strconv.Itoa(n)), nil
+	}
+}
+
+// HDFImpactPresentAtLeast reports whether any requirement's impact is at least
+// threshold (e.g. a Critical finding maps to impact 0.9).
+func HDFImpactPresentAtLeast(threshold float64) func([]byte) (Answer, error) {
+	return func(b []byte) (Answer, error) {
+		d, err := parseHDF(b)
+		if err != nil {
+			return Answer{}, err
+		}
+		for _, r := range hdfRequirements(d) {
+			if r.Impact >= threshold {
+				return Answered("true"), nil
+			}
+		}
+		return Answered("false"), nil
+	}
+}
+
 // lastSegment returns the substring after the final '/', or s if there is none.
 func lastSegment(s string) string {
 	for i := len(s) - 1; i >= 0; i-- {

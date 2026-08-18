@@ -95,3 +95,73 @@ func GrypeCVEPresent(cve string) func([]byte) (Answer, error) {
 		return Answered("false"), nil
 	}
 }
+
+// GrypeSeverityPresent reports whether any match has the given severity (e.g.
+// "Critical"). Existence of a severity band survives normalization.
+func GrypeSeverityPresent(sev string) func([]byte) (Answer, error) {
+	return func(b []byte) (Answer, error) {
+		g, err := parseGrype(b)
+		if err != nil {
+			return Answer{}, err
+		}
+		for _, m := range g.Matches {
+			if m.Vulnerability.Severity == sev {
+				return Answered("true"), nil
+			}
+		}
+		return Answered("false"), nil
+	}
+}
+
+// rawZap is the subset of ZAP JSON the classifier reads: alerts across sites, each
+// with a numeric riskcode (0 informational, 1 low, 2 medium, 3 high). ZAP does not
+// deduplicate, so its alert count is preserved through conversion.
+type rawZap struct {
+	Site []struct {
+		Alerts []struct {
+			RiskCode string `json:"riskcode"`
+		} `json:"alerts"`
+	} `json:"site"`
+}
+
+func parseZap(b []byte) (rawZap, error) {
+	var z rawZap
+	if err := json.Unmarshal(b, &z); err != nil {
+		return rawZap{}, fmt.Errorf("parse zap: %w", err)
+	}
+	return z, nil
+}
+
+func zapAlerts(z rawZap) []string {
+	var out []string
+	for _, s := range z.Site {
+		for _, a := range s.Alerts {
+			out = append(out, a.RiskCode)
+		}
+	}
+	return out
+}
+
+// ZapAlertCount is the total number of ZAP alerts across all sites.
+func ZapAlertCount(b []byte) (Answer, error) {
+	z, err := parseZap(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	return Answered(strconv.Itoa(len(zapAlerts(z)))), nil
+}
+
+// ZapHighCount is the number of high-risk ZAP alerts (riskcode 3).
+func ZapHighCount(b []byte) (Answer, error) {
+	z, err := parseZap(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	n := 0
+	for _, rc := range zapAlerts(z) {
+		if rc == "3" {
+			n++
+		}
+	}
+	return Answered(strconv.Itoa(n)), nil
+}

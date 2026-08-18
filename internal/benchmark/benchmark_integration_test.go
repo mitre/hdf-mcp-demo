@@ -109,11 +109,14 @@ func TestBenchmark_Pipeline(t *testing.T) {
 
 	// Ground truth is computed from data — pin the headline classes.
 	want := map[string]truth.Class{
-		"gosec-distinct-rules":  truth.ClassB, // 7 raw vs 3 hdf
-		"gosec-total-findings":  truth.ClassB,
-		"grype-match-count":     truth.ClassA, // 89 == 89 (no dedup)
-		"grype-cve-present":     truth.ClassA,
-		"grype-compliance-rate": truth.ClassC, // no native raw pass rate
+		"gosec-distinct-rules":    truth.ClassB, // 7 raw vs 3 hdf
+		"gosec-total-findings":    truth.ClassB,
+		"grype-match-count":       truth.ClassA, // 89 == 89 (no dedup)
+		"grype-cve-present":       truth.ClassA,
+		"grype-compliance-rate":   truth.ClassC, // no native raw pass rate
+		"grype-has-critical":      truth.ClassA, // Critical present both views
+		"zap-alert-count":         truth.ClassA, // 28 == 28 (no dedup)
+		"zap-high-severity-count": truth.ClassA, // 3 == 3 (severity preserved)
 	}
 	for _, r := range results {
 		if want[r.ID] != r.Class {

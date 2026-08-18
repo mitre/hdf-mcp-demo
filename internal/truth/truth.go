@@ -26,6 +26,7 @@ const (
 	ClassA Class = "A" // answer-preserving: raw == HDF
 	ClassB Class = "B" // normalization-divergent: raw != HDF, both valid for their view
 	ClassC Class = "C" // HDF-native: raw cannot natively answer, HDF can
+	ClassD Class = "D" // raw-only: HDF normalization dropped the field, raw can answer, HDF cannot
 )
 
 // Answer is a question's computed answer over one data view. Value is the
@@ -88,12 +89,16 @@ func Classify(q Question, rawFixture, hdfDoc []byte) (Result, error) {
 	}, nil
 }
 
-// classOf is the classification rule. Order matters: an answer the raw view cannot
-// express is Class C (HDF adds a capability) regardless of the HDF value; among
-// answers both views express, equality is Class A and disagreement is Class B.
+// classOf is the classification rule. Order matters: an answer only one view can
+// express is Class C (HDF-native) or Class D (raw-only) regardless of the other
+// value; among answers both views express, equality is Class A and disagreement
+// is Class B.
 func classOf(raw, hdf Answer) Class {
 	if !raw.Answerable && hdf.Answerable {
 		return ClassC
+	}
+	if raw.Answerable && !hdf.Answerable {
+		return ClassD
 	}
 	if raw.Answerable && hdf.Answerable && raw.Value == hdf.Value {
 		return ClassA

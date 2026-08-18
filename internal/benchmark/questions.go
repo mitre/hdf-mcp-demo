@@ -79,6 +79,27 @@ func Bank() []Question {
 			Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json",
 			Truth: truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.HDFComplianceRate},
 		},
+		{
+			ID:   "grype-has-critical",
+			Ask:  "Does the grype scan contain any Critical-severity finding? Answer yes or no.",
+			Kind: KindBool, Intent: IntentHDF,
+			Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json",
+			Truth: truth.Question{Raw: truth.GrypeSeverityPresent("Critical"), HDF: truth.HDFImpactPresentAtLeast(0.9)},
+		},
+		{
+			ID:   "zap-alert-count",
+			Ask:  "How many alerts are in the ZAP (DAST) scan?",
+			Kind: KindCount, Intent: IntentHDF, // A: ZAP does not dedup, so raw==HDF
+			Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json",
+			Truth: truth.Question{Raw: truth.ZapAlertCount, HDF: truth.HDFRequirementCount},
+		},
+		{
+			ID:   "zap-high-severity-count",
+			Ask:  "How many high-risk alerts are in the ZAP scan?",
+			Kind: KindCount, Intent: IntentHDF,
+			Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json",
+			Truth: truth.Question{Raw: truth.ZapHighCount, HDF: truth.HDFImpactCountAtLeast(0.7)},
+		},
 	}
 }
 
@@ -92,9 +113,14 @@ func (q Question) key(class truth.Class, rawView, hdfView truth.Answer, arm Arm)
 		return hdfView // == rawView
 	case truth.ClassC:
 		if arm == ArmRaw {
-			return truth.Unanswerable()
+			return truth.Unanswerable() // raw out of remit (hdf-native)
 		}
 		return hdfView
+	case truth.ClassD:
+		if arm == ArmHDF {
+			return truth.Unanswerable() // hdf out of remit (raw-only field)
+		}
+		return rawView
 	default: // Class B — grade to intent, same key for both arms
 		if q.Intent == IntentRaw {
 			return rawView

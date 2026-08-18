@@ -110,6 +110,7 @@ type jsonSummary struct {
 	ByType        map[string]jsonClassAccuracy `json:"byType"`
 	All           jsonClassAccuracy            `json:"all"`
 	RawOutOfRemit *jsonRemit                   `json:"rawOutOfRemit,omitempty"`
+	HDFOutOfRemit *jsonRemit                   `json:"hdfOutOfRemit,omitempty"`
 	Cost          jsonCost                     `json:"cost"`
 }
 
@@ -170,7 +171,7 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 			jr.Questions = append(jr.Questions, jq)
 		}
 		byType := map[string]jsonClassAccuracy{}
-		for _, c := range []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC} {
+		for _, c := range allClasses {
 			if sub := filterClass(run.Results, c); len(sub) > 0 {
 				byType[typeLabel(c)] = classAccuracy(sub)
 			}
@@ -184,6 +185,9 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 		summary := jsonSummary{ByType: byType, All: classAccuracy(run.Results), Cost: cost}
 		if hall, abst, outOf := remit(run.Results, ArmRaw); outOf > 0 {
 			summary.RawOutOfRemit = &jsonRemit{Hallucinated: hall, Abstained: abst, Total: outOf}
+		}
+		if hall, abst, outOf := remit(run.Results, ArmHDF); outOf > 0 {
+			summary.HDFOutOfRemit = &jsonRemit{Hallucinated: hall, Abstained: abst, Total: outOf}
 		}
 		jr.Summary = summary
 		report.Runs = append(report.Runs, jr)
@@ -243,7 +247,7 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 
 		b.WriteString("\n**Accuracy by type** (correct / questions the arm can answer)\n\n")
 		b.WriteString("| type | raw-file | hdf-mcp |\n|---|---|---|\n")
-		for _, c := range []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC} {
+		for _, c := range allClasses {
 			sub := filterClass(run.Results, c)
 			if len(sub) == 0 {
 				continue
@@ -258,6 +262,10 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 
 		if hall, abst, outOf := remit(run.Results, ArmRaw); outOf > 0 {
 			fmt.Fprintf(&b, "\n_Raw-file arm on hdf-only questions (out of remit, not scored): %d hallucinated / %d abstained of %d._\n",
+				hall, abst, outOf)
+		}
+		if hall, abst, outOf := remit(run.Results, ArmHDF); outOf > 0 {
+			fmt.Fprintf(&b, "\n_HDF-mcp arm on raw-only questions (out of remit, not scored): %d hallucinated / %d abstained of %d._\n",
 				hall, abst, outOf)
 		}
 		if rf, hf := failures(run.Results, ArmRaw), failures(run.Results, ArmHDF); rf > 0 || hf > 0 {

@@ -87,6 +87,44 @@ func TestRenderJSON(t *testing.T) {
 	}
 }
 
+// The raw-only (Class D) path is symmetric to hdf-only: the HDF arm is out of
+// remit. No live fixture yields a genuine Class D (these converters are near-
+// lossless), so exercise it synthetically.
+func TestClassD_RawOnly(t *testing.T) {
+	q := Question{Intent: IntentHDF}
+	if k := q.key(truth.ClassD, truth.Answered("apk"), truth.Unanswerable(), ArmHDF); k.Answerable {
+		t.Errorf("Class D hdf key should be unanswerable")
+	}
+	if k := q.key(truth.ClassD, truth.Answered("apk"), truth.Unanswerable(), ArmRaw); k.Value != "apk" {
+		t.Errorf("Class D raw key should be the raw view")
+	}
+	if typeLabel(truth.ClassD) != "raw-only" {
+		t.Errorf("typeLabel(D) = %q, want raw-only", typeLabel(truth.ClassD))
+	}
+
+	rs := []QuestionResult{{
+		ID: "d1", Ask: "?", Class: truth.ClassD,
+		Raw: ArmResult{Arm: ArmRaw, Verdict: Correct, Scored: true, Cost: agent.Result{PromptTokens: 10}},
+		HDF: ArmResult{Arm: ArmHDF, Verdict: Hallucinated, Scored: false, Cost: agent.Result{PromptTokens: 20}},
+	}}
+	if rc, rn := scoredAccuracy(rs, ArmRaw); rc != 1 || rn != 1 {
+		t.Errorf("raw scored = %d/%d, want 1/1", rc, rn)
+	}
+	if _, hn := scoredAccuracy(rs, ArmHDF); hn != 0 {
+		t.Errorf("hdf scored total = %d, want 0 (out of remit)", hn)
+	}
+	if _, _, hOut := remit(rs, ArmHDF); hOut != 1 {
+		t.Errorf("hdf out-of-remit total = %d, want 1", hOut)
+	}
+	js, err := RenderJSON(RunMeta{Models: []string{"m"}}, []ModelRun{{Model: "m", Results: rs}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js, "hdfOutOfRemit") || !strings.Contains(js, "raw-only") {
+		t.Errorf("json missing hdfOutOfRemit / raw-only:\n%s", js)
+	}
+}
+
 func TestRenderMarkdown(t *testing.T) {
 	meta := RunMeta{Models: []string{"stub"}, Concurrency: 4, MaxTokens: 1024, MaxIters: 6}
 	md := RenderMarkdown(meta, sampleRuns(), false)
