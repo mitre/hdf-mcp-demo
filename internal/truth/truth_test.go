@@ -40,7 +40,7 @@ func TestRawParsers(t *testing.T) {
 	if a, _ := GosecRulePresent("G999")(gosec); a.Value != "false" {
 		t.Errorf("GosecRulePresent(G999) = %+v; want false", a)
 	}
-	if a, _ := AlwaysUnanswerable(gosec); a.Answerable {
+	if a, _ := AlwaysUnanswerable([][]byte{gosec}); a.Answerable {
 		t.Errorf("gosec compliance rate should be unanswerable, got %+v", a)
 	}
 
@@ -141,7 +141,7 @@ func TestClassify_GosecPins(t *testing.T) {
 			if !ok {
 				t.Fatalf("question %s not in Bank()", tc.id)
 			}
-			got, err := Classify(c.Question, raw, hdf)
+			got, err := Classify(c.Question, [][]byte{raw}, [][]byte{hdf})
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}
@@ -158,5 +158,53 @@ func TestClassify_GosecPins(t *testing.T) {
 				t.Errorf("hdf answer = %q, want %q", got.HDFAnswer.Value, tc.wantHDF)
 			}
 		})
+	}
+}
+
+// TestInspecTruth pins the InSpec raw-view answers against the real fixture, and
+// — the part that matters — asserts they agree with the HDF view after
+// conversion. If a future converter change made InSpec normalization lossy, these
+// questions would silently stop being Class A and the study would start grading
+// two arms against different keys.
+func TestInspecTruth(t *testing.T) {
+	raw, err := os.ReadFile("../../fixtures/inspec.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		fn   func([]byte) (Answer, error)
+		want string
+	}{
+		{"control count", InspecControlCount, "192"},
+		{"compliance rate", InspecComplianceRate, "80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.fn(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Answerable || got.Value != tc.want {
+				t.Errorf("got %+v, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGrypeRelatedVulns pins the category-5 pair. The two views must AGREE (45):
+// conversion keeps the field, so this is Class A and the HDF arm is graded on it
+// rather than excused. If a converter change ever did drop the field, this test
+// fails loudly instead of the question silently reclassifying.
+func TestGrypeRelatedVulns(t *testing.T) {
+	raw, err := os.ReadFile("../../fixtures/grype.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GrypeRelatedVulnCount(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "45" {
+		t.Errorf("raw related-vuln count = %q, want 45", got.Value)
 	}
 }

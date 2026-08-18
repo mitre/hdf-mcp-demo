@@ -61,7 +61,7 @@ func TestClassify_GrypeConvert(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
-			got, err := Classify(byID[tc.id].Question, raw, hdf)
+			got, err := Classify(byID[tc.id].Question, [][]byte{raw}, [][]byte{hdf})
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}

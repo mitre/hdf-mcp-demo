@@ -136,3 +136,41 @@ func lastSegment(s string) string {
 	}
 	return s
 }
+
+// HDFRelatedVulnCountFromCode counts requirements whose retained `code` payload
+// lists at least one related vulnerability.
+//
+// It exists to establish a fact the study needs to state precisely: HDF
+// conversion is NOT lossy here. The converter stores the original scanner finding
+// byte-for-byte in `code`, so the information is present in the document and the
+// question is Class A — both views can answer it. What the HDF *arm* lacks is a
+// read tool that projects `code`. Grading this against an answerable key is the
+// strict choice on purpose: excusing the HDF arm as out-of-remit would hide a real
+// surface limitation behind a claim of information loss that is not true.
+func HDFRelatedVulnCountFromCode(b []byte) (Answer, error) {
+	var d struct {
+		Baselines []struct {
+			Requirements []struct {
+				Code string `json:"code"`
+			} `json:"requirements"`
+		} `json:"baselines"`
+	}
+	if err := json.Unmarshal(b, &d); err != nil {
+		return Answer{}, fmt.Errorf("parse hdf: %w", err)
+	}
+	n := 0
+	for _, bl := range d.Baselines {
+		for _, r := range bl.Requirements {
+			var finding struct {
+				Related []json.RawMessage `json:"relatedVulnerabilities"`
+			}
+			if err := json.Unmarshal([]byte(r.Code), &finding); err != nil {
+				continue // a non-JSON code payload simply carries no related vulns
+			}
+			if len(finding.Related) > 0 {
+				n++
+			}
+		}
+	}
+	return Answered(strconv.Itoa(n)), nil
+}

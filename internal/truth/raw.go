@@ -165,3 +165,92 @@ func ZapHighCount(b []byte) (Answer, error) {
 	}
 	return Answered(strconv.Itoa(n)), nil
 }
+
+// rawInspec is the subset of an InSpec ExecJSON run the classifier reads. InSpec
+// reports per-control results, and a control may have several (one per test), so
+// control count and result count are different questions — the same distinction
+// gosec forces between rules and finding sites.
+type rawInspec struct {
+	Profiles []struct {
+		Controls []struct {
+			ID      string `json:"id"`
+			Results []struct {
+				Status string `json:"status"`
+			} `json:"results"`
+		} `json:"controls"`
+	} `json:"profiles"`
+}
+
+func parseInspec(b []byte) (rawInspec, error) {
+	var i rawInspec
+	if err := json.Unmarshal(b, &i); err != nil {
+		return rawInspec{}, fmt.Errorf("parse inspec: %w", err)
+	}
+	return i, nil
+}
+
+// InspecControlCount is the number of controls across all profiles. InSpec is
+// already rule-shaped, so normalization has nothing to deduplicate and this
+// agrees with the HDF requirement count — an apples-to-apples Class-A count over
+// a large document.
+func InspecControlCount(b []byte) (Answer, error) {
+	i, err := parseInspec(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	n := 0
+	for _, p := range i.Profiles {
+		n += len(p.Controls)
+	}
+	return Answered(strconv.Itoa(n)), nil
+}
+
+// InspecComplianceRate is passed results / total results as a whole-number
+// percent. Unlike a vulnerability scanner, a compliance run states pass and fail
+// natively, so the raw view CAN answer this — it is the fair counterpart to the
+// Class-C grype rate, and it must match HDFComplianceRate's result-level
+// definition to stay comparable.
+func InspecComplianceRate(b []byte) (Answer, error) {
+	i, err := parseInspec(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	var passed, total int
+	for _, p := range i.Profiles {
+		for _, c := range p.Controls {
+			for _, r := range c.Results {
+				total++
+				if r.Status == "passed" {
+					passed++
+				}
+			}
+		}
+	}
+	if total == 0 {
+		return Answered("0"), nil
+	}
+	return Answered(strconv.Itoa(passed * 100 / total)), nil
+}
+
+// GrypeRelatedVulnCount counts matches carrying at least one related
+// vulnerability. This is a tool-specific field: grype records it, and while HDF
+// conversion preserves it verbatim inside the requirement's `code` payload, no
+// HDF read tool projects `code` — so it is the category-5 case where the bounded
+// surface, not normalization, is what costs the HDF arm.
+func GrypeRelatedVulnCount(b []byte) (Answer, error) {
+	var g struct {
+		Matches []struct {
+			Related []json.RawMessage `json:"relatedVulnerabilities"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(b, &g); err != nil {
+		return Answer{}, fmt.Errorf("parse grype: %w", err)
+	}
+	n := 0
+	for _, m := range g.Matches {
+		if len(m.Related) > 0 {
+			n++
+		}
+	}
+	return Answered(strconv.Itoa(n)), nil
+}
