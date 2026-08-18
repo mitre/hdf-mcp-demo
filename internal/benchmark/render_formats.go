@@ -20,6 +20,7 @@ type ModelRun struct {
 // the model names and grading-relevant settings are recorded.
 type RunMeta struct {
 	Timestamp   string // caller-supplied RFC3339; empty is fine (tests, reproducibility)
+	Provider    string
 	Models      []string
 	Concurrency int
 	MaxTokens   int
@@ -35,6 +36,9 @@ func MetaText(m RunMeta) string {
 	b.WriteString("HDF-MCP benchmark\n")
 	if m.Timestamp != "" {
 		fmt.Fprintf(&b, "  timestamp: %s\n", m.Timestamp)
+	}
+	if m.Provider != "" {
+		fmt.Fprintf(&b, "  provider:  %s\n", m.Provider)
 	}
 	fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
 	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s\n",
@@ -54,6 +58,7 @@ func tempStr(t float64) string {
 
 type jsonMeta struct {
 	Timestamp   string   `json:"timestamp,omitempty"`
+	Provider    string   `json:"provider,omitempty"`
 	Models      []string `json:"models"`
 	Concurrency int      `json:"concurrency"`
 	MaxTokens   int      `json:"maxTokens"`
@@ -172,7 +177,7 @@ func classAccuracy(rs []QuestionResult) jsonClassAccuracy {
 // views.
 func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 	report := jsonReport{Meta: jsonMeta{
-		Timestamp: meta.Timestamp, Models: meta.Models, Concurrency: meta.Concurrency,
+		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
 		Repeat: meta.Repeat, Temperature: meta.Temperature,
 	}}
@@ -237,6 +242,9 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 	b.WriteString("# HDF-MCP benchmark\n\n")
 	if meta.Timestamp != "" {
 		fmt.Fprintf(&b, "- **timestamp:** %s\n", meta.Timestamp)
+	}
+	if meta.Provider != "" {
+		fmt.Fprintf(&b, "- **provider:** %s\n", meta.Provider)
 	}
 	fmt.Fprintf(&b, "- **models:** %s\n", strings.Join(meta.Models, ", "))
 	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s\n\n",

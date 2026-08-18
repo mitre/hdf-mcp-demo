@@ -46,13 +46,14 @@ func main() {
 	overwrite := flag.Bool("overwrite", false, "allow -out to overwrite an existing file")
 	repeat := flag.Int("repeat", 1, "runs per question per arm; >1 reports accuracy as a rate and cost as mean±stddev")
 	temperature := flag.Float64("temperature", 0, "sampling temperature (0 = deterministic); negative to omit it entirely for models that reject it")
+	provider := flag.String("provider", "openai", "model provider: openai (OpenAI-compatible /v1 — LiteLLM, vLLM, Ollama's /v1 shim) | ollama (native /api/chat, fully local)")
 	flag.Parse()
 
 	cfg := runConfig{
 		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
 		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
 		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
-		repeat: *repeat, temperature: *temperature,
+		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider),
 	}
 	if err := run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -73,6 +74,41 @@ type runConfig struct {
 	overwrite         bool
 	repeat            int
 	temperature       float64
+	provider          string
+}
+
+// endpoint resolves the provider's base URL. For ollama it is optional (the
+// adapter defaults to localhost); OLLAMA_HOST/OLLAMA_BASE_URL override it.
+func endpoint(cfg runConfig) string {
+	if cfg.provider == "ollama" {
+		if b := os.Getenv("OLLAMA_HOST"); b != "" {
+			return b
+		}
+		return os.Getenv("OLLAMA_BASE_URL")
+	}
+	return os.Getenv("OPENAI_BASE_URL")
+}
+
+// buildInstrument constructs the provider's instrument for one model, applying the
+// shared max-tokens / temperature knobs to whichever provider is selected.
+func buildInstrument(cfg runConfig, base, model string) instrument.Instrument {
+	var setTemp = cfg.temperature >= 0 // negative sentinel = omit
+	if cfg.provider == "ollama" {
+		o := instrument.NewOllama(base, model)
+		o.NumPredict = cfg.maxTokens
+		if setTemp {
+			t := cfg.temperature
+			o.Temperature = &t
+		}
+		return o
+	}
+	o := instrument.NewOpenAI(base, model, os.Getenv("OPENAI_API_KEY"))
+	o.MaxTokens = cfg.maxTokens
+	if setTemp {
+		t := cfg.temperature
+		o.Temperature = &t
+	}
+	return o
 }
 
 // splitModels parses the comma-separated -models flag, trimming blanks.
@@ -91,8 +127,18 @@ func splitModels(s string) []string {
 // exists) fails in the first second instead of after an hour. It returns the
 // located hdf binary.
 func preflight(cfg runConfig, base string, models []string) (string, error) {
-	if base == "" || len(models) == 0 {
-		return "", fmt.Errorf("set OPENAI_BASE_URL and OPENAI_MODEL or OPENAI_MODEL_LIST (or pass -models); and OPENAI_API_KEY if required")
+	switch cfg.provider {
+	case "openai":
+		if base == "" {
+			return "", fmt.Errorf("set OPENAI_BASE_URL (or use -provider ollama); and OPENAI_API_KEY if the endpoint requires it")
+		}
+	case "ollama":
+		// base is optional — the adapter defaults to localhost:11434
+	default:
+		return "", fmt.Errorf("unknown -provider %q (want openai | ollama)", cfg.provider)
+	}
+	if len(models) == 0 {
+		return "", fmt.Errorf("set -models (or OPENAI_MODEL / OPENAI_MODEL_LIST)")
 	}
 	switch cfg.format {
 	case "text", "json", "markdown", "md":
@@ -125,7 +171,7 @@ func preflight(cfg runConfig, base string, models []string) (string, error) {
 }
 
 func run(cfg runConfig) error {
-	base := os.Getenv("OPENAI_BASE_URL")
+	base := endpoint(cfg)
 	models := cfg.models
 	if len(models) == 0 {
 		models = instrument.ModelsFromEnv()
@@ -156,11 +202,15 @@ func run(cfg runConfig) error {
 
 	// Echo exactly what will run (to stderr, so stdout stays clean for json/markdown)
 	// — catches a stale OPENAI_MODEL_LIST silently overriding an intended single model.
-	fmt.Fprintf(os.Stderr, "endpoint: %s   hdf: %s\nmodels: %s   questions: %d   concurrency: %d   ad-hoc: %v   format: %s\n\n",
-		base, bin, strings.Join(models, ", "), len(bank), cfg.concurrency, cfg.adhoc, cfg.format)
+	shownBase := base
+	if shownBase == "" && cfg.provider == "ollama" {
+		shownBase = instrument.DefaultOllamaURL + " (default)"
+	}
+	fmt.Fprintf(os.Stderr, "provider: %s   endpoint: %s   hdf: %s\nmodels: %s   questions: %d   concurrency: %d   ad-hoc: %v   format: %s\n\n",
+		cfg.provider, shownBase, bin, strings.Join(models, ", "), len(bank), cfg.concurrency, cfg.adhoc, cfg.format)
 
 	meta := benchmark.RunMeta{
-		Timestamp: time.Now().UTC().Format(time.RFC3339), Models: models,
+		Timestamp: time.Now().UTC().Format(time.RFC3339), Provider: cfg.provider, Models: models,
 		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
 		Repeat: cfg.repeat, Temperature: cfg.temperature,
 	}
@@ -170,12 +220,7 @@ func run(cfg runConfig) error {
 	}
 	var runs []benchmark.ModelRun
 	for _, model := range models {
-		inst := instrument.NewOpenAI(base, model, os.Getenv("OPENAI_API_KEY"))
-		inst.MaxTokens = cfg.maxTokens
-		if cfg.temperature >= 0 { // negative sentinel = omit temperature entirely
-			t := cfg.temperature
-			inst.Temperature = &t
-		}
+		inst := buildInstrument(cfg, base, model)
 
 		// A per-model timeout (if set) isolates a slow/cold model so it can't spend
 		// the whole budget and starve the rest; a failure is reported and skipped

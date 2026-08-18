@@ -16,9 +16,11 @@ const DefaultOllamaURL = "http://127.0.0.1:11434"
 // cannot incur a charge. Requires a tool-calling-capable pulled model (qwen2.5,
 // llama3.1/3.2, mistral-nemo, …).
 type Ollama struct {
-	BaseURL string
-	Model   string
-	HTTP    *http.Client
+	BaseURL     string
+	Model       string
+	NumPredict  int      // completion-token cap (Ollama's num_predict); 0 = model default
+	Temperature *float64 // when non-nil, sampling temperature (0 = deterministic)
+	HTTP        *http.Client
 }
 
 // NewOllama builds a local Ollama instrument. baseURL == "" uses DefaultOllamaURL.
@@ -31,6 +33,18 @@ func NewOllama(baseURL, model string) *Ollama {
 
 // Name identifies the instrument.
 func (o *Ollama) Name() string { return "ollama:" + o.Model }
+
+// options builds Ollama's per-request options map from the configured knobs.
+func (o *Ollama) options() map[string]any {
+	m := map[string]any{}
+	if o.NumPredict > 0 {
+		m["num_predict"] = o.NumPredict
+	}
+	if o.Temperature != nil {
+		m["temperature"] = *o.Temperature
+	}
+	return m
+}
 
 type olMessage struct {
 	Role      string       `json:"role"`
@@ -54,6 +68,9 @@ func (o *Ollama) Chat(ctx context.Context, msgs []Message, tools []Tool) (Result
 	}
 	if len(tools) > 0 {
 		body["tools"] = toOllamaTools(tools)
+	}
+	if opts := o.options(); len(opts) > 0 {
+		body["options"] = opts
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
