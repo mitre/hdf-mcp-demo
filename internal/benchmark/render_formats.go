@@ -28,6 +28,7 @@ type RunMeta struct {
 	AdHoc       bool
 	Repeat      int
 	Temperature float64
+	NumCtx      int // ollama only: the context window the run was given; 0 = provider default
 }
 
 // MetaText renders the run metadata as a short plain-text header.
@@ -41,9 +42,34 @@ func MetaText(m RunMeta) string {
 		fmt.Fprintf(&b, "  provider:  %s\n", m.Provider)
 	}
 	fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
-	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s\n",
-		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature))
+	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s%s\n",
+		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature), numCtxStr(m.NumCtx, " "))
+	if m.Provider != "" {
+		fmt.Fprintf(&b, "  cost:      %s\n", chargeStatement(m.Provider))
+	}
 	return b.String()
+}
+
+// numCtxStr renders the context-window setting for the providers that have one,
+// and nothing at all when it is unset — an OpenAI-side run has no such knob, so
+// printing "num-ctx=0" there would imply a setting that does not exist.
+func numCtxStr(n int, sep string) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%snum-ctx=%d", sep, n)
+}
+
+// chargeStatement records what the run cost externally. The study's
+// pre-registration requires a zero-charge instrument and requires the report to
+// SAY so, rather than leaving a reader to infer it from a provider name: a local
+// Ollama run cannot bill, while an OpenAI-compatible gateway depends on whose
+// endpoint it was, which this harness cannot know.
+func chargeStatement(provider string) string {
+	if provider == "ollama" {
+		return "local Ollama inference — no external API call, zero charge incurred"
+	}
+	return "OpenAI-compatible endpoint — charge depends on the endpoint; the study requires a zero-charge instrument (free tier with no payment method, or self-hosted)"
 }
 
 // tempStr renders a temperature, or "omitted" for the negative sentinel.
@@ -66,6 +92,8 @@ type jsonMeta struct {
 	AdHoc       bool     `json:"adHoc"`
 	Repeat      int      `json:"repeat"`
 	Temperature float64  `json:"temperature"`
+	NumCtx      int      `json:"numCtx,omitempty"`
+	Cost        string   `json:"costStatement,omitempty"`
 }
 
 type jsonAnswer struct {
@@ -179,7 +207,8 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 	report := jsonReport{Meta: jsonMeta{
 		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
-		Repeat: meta.Repeat, Temperature: meta.Temperature,
+		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx,
+		Cost: chargeStatement(meta.Provider),
 	}}
 	for _, run := range runs {
 		jr := jsonRun{Model: run.Model}
@@ -247,22 +276,27 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 		fmt.Fprintf(&b, "- **provider:** %s\n", meta.Provider)
 	}
 	fmt.Fprintf(&b, "- **models:** %s\n", strings.Join(meta.Models, ", "))
-	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s\n\n",
-		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature))
+	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s%s\n",
+		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature), numCtxStr(meta.NumCtx, ", "))
+	if meta.Provider != "" {
+		fmt.Fprintf(&b, "- **cost:** %s\n", chargeStatement(meta.Provider))
+	}
+	b.WriteString("\n")
 
 	for _, run := range runs {
 		fmt.Fprintf(&b, "## %s (%d questions)\n\n", run.Model, len(run.Results))
 
 		if adHoc {
-			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | adhocTok |\n")
-			b.WriteString("|---|---|---|---|--:|--:|--:|\n")
+			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | rawSec | hdfSec | adhocTok |\n")
+			b.WriteString("|---|---|---|---|--:|--:|--:|--:|--:|\n")
 		} else {
-			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok |\n")
-			b.WriteString("|---|---|---|---|--:|--:|\n")
+			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | rawSec | hdfSec |\n")
+			b.WriteString("|---|---|---|---|--:|--:|--:|--:|\n")
 		}
 		for _, r := range run.Results {
-			row := fmt.Sprintf("| %s | %s | %s | %s | %d | %d |",
-				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens())
+			row := fmt.Sprintf("| %s | %s | %s | %s | %d | %d | %.1f | %.1f |",
+				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
+				r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 			if adHoc {
 				ah := 0
 				if r.HDFAdHoc != nil {
@@ -306,6 +340,14 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 		fmt.Fprintf(&b, "- hdf-mcp arm (pipeline): **%d** (%s vs raw)\n", hdfTok, ratio(hdfTok, rawTok))
 		if adHoc {
 			fmt.Fprintf(&b, "- hdf-mcp arm (ad-hoc convert): **%d** (%s vs raw)\n", adhocTok, ratio(adhocTok, rawTok))
+		}
+
+		rawSec, hdfSec, adhocSec := elapsedTotals(run.Results)
+		b.WriteString("\n**Wall-clock** (sum of arm latencies, seconds)\n\n")
+		fmt.Fprintf(&b, "- raw-file arm: **%.1f**\n", rawSec)
+		fmt.Fprintf(&b, "- hdf-mcp arm (pipeline): **%.1f** (%s vs raw)\n", hdfSec, ratioF(hdfSec, rawSec))
+		if adHoc {
+			fmt.Fprintf(&b, "- hdf-mcp arm (ad-hoc convert): **%.1f** (%s vs raw)\n", adhocSec, ratioF(adhocSec, rawSec))
 		}
 		b.WriteString("\n")
 	}

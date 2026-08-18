@@ -144,3 +144,75 @@ func TestRenderMarkdown(t *testing.T) {
 		t.Errorf("markdown should not have an ad-hoc column when adHoc=false")
 	}
 }
+
+// TestMetaNumCtx checks the context window is reported when a run had one and
+// stays out of the output entirely when it did not — an OpenAI-side run has no
+// such knob, so printing num-ctx=0 there would describe a setting that does not
+// exist.
+func TestMetaNumCtx(t *testing.T) {
+	set := RunMeta{Models: []string{"m"}, NumCtx: 32768}
+	if got := MetaText(set); !strings.Contains(got, "num-ctx=32768") {
+		t.Errorf("MetaText omitted num-ctx:\n%s", got)
+	}
+	if got := RenderMarkdown(set, nil, false); !strings.Contains(got, "num-ctx=32768") {
+		t.Errorf("RenderMarkdown omitted num-ctx:\n%s", got)
+	}
+	js, err := RenderJSON(set, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js, `"numCtx": 32768`) {
+		t.Errorf("RenderJSON omitted numCtx:\n%s", js)
+	}
+
+	unset := RunMeta{Models: []string{"m"}}
+	if got := MetaText(unset); strings.Contains(got, "num-ctx") {
+		t.Errorf("MetaText reported num-ctx for a run without one:\n%s", got)
+	}
+	if got := RenderMarkdown(unset, nil, false); strings.Contains(got, "num-ctx") {
+		t.Errorf("RenderMarkdown reported num-ctx for a run without one:\n%s", got)
+	}
+	js, err = RenderJSON(unset, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(js, "numCtx") {
+		t.Errorf("RenderJSON reported numCtx for a run without one:\n%s", js)
+	}
+}
+
+// TestChargeStatement pins an explicit acceptance criterion of the study: the
+// report must STATE what the run cost externally, not leave it to be inferred.
+func TestChargeStatement(t *testing.T) {
+	local := RunMeta{Models: []string{"m"}, Provider: "ollama"}
+	if got := MetaText(local); !strings.Contains(got, "zero charge") {
+		t.Errorf("local run must state zero charge:\n%s", got)
+	}
+	if got := RenderMarkdown(local, nil, false); !strings.Contains(got, "zero charge") {
+		t.Errorf("markdown must state zero charge:\n%s", got)
+	}
+	js, err := RenderJSON(local, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js, "costStatement") {
+		t.Errorf("json must carry the cost statement:\n%s", js)
+	}
+	// A gateway run must NOT claim zero charge — the harness cannot know.
+	remote := RunMeta{Models: []string{"m"}, Provider: "openai"}
+	if got := MetaText(remote); strings.Contains(got, "zero charge incurred") {
+		t.Errorf("gateway run must not claim zero charge:\n%s", got)
+	}
+}
+
+// TestWallClockReported pins the other unmet criterion: wall-clock was measured
+// but only ever surfaced in JSON.
+func TestWallClockReported(t *testing.T) {
+	runs := sampleRuns()
+	if got := Render(runs[0].Model, runs[0].Results, false); !strings.Contains(got, "wall-clock") {
+		t.Errorf("text report omits wall-clock:\n%s", got)
+	}
+	if got := RenderMarkdown(RunMeta{Models: []string{"m"}}, runs, false); !strings.Contains(got, "Wall-clock") {
+		t.Errorf("markdown report omits wall-clock:\n%s", got)
+	}
+}

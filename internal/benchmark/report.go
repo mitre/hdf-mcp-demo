@@ -16,15 +16,16 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	fmt.Fprintf(&b, "model: %s   (%d questions)\n\n", model, len(results))
 
 	// Per-question detail.
-	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s", "question", "type", "raw", "hdf", "rawTok", "hdfTok")
+	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "rawSec", "hdfSec")
 	if adHoc {
 		hdr += fmt.Sprintf(" %8s", "adhocTok")
 	}
 	b.WriteString(hdr + "\n" + strings.Repeat("-", len(hdr)) + "\n")
 	for _, r := range results {
-		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d",
+		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d %7.1f %7.1f",
 			trunc(r.ID, 22), typeLabel(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
-			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens())
+			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
+			r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 		if adHoc {
 			ah := 0
 			if r.HDFAdHoc != nil {
@@ -77,6 +78,17 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	fmt.Fprintf(&b, "  hdf-mcp arm (pipeline) ....... %8d   %s vs raw\n", hdfTok, ratio(hdfTok, rawTok))
 	if adHoc {
 		fmt.Fprintf(&b, "  hdf-mcp arm (ad-hoc convert) . %8d   %s vs raw\n", adhocTok, ratio(adhocTok, rawTok))
+	}
+
+	// Wall-clock, reported next to tokens because they can disagree: a bounded
+	// tool response is cheap in tokens yet costs a round trip, and locally the
+	// round trip is often what the user actually waits on.
+	rawSec, hdfSec, adhocSec := elapsedTotals(results)
+	b.WriteString("\nwall-clock (sum of arm latencies, seconds):\n")
+	fmt.Fprintf(&b, "  raw-file arm ................. %8.1f\n", rawSec)
+	fmt.Fprintf(&b, "  hdf-mcp arm (pipeline) ....... %8.1f   %s vs raw\n", hdfSec, ratioF(hdfSec, rawSec))
+	if adHoc {
+		fmt.Fprintf(&b, "  hdf-mcp arm (ad-hoc convert) . %8.1f   %s vs raw\n", adhocSec, ratioF(adhocSec, rawSec))
 	}
 
 	b.WriteString(footer(adHoc))
@@ -218,6 +230,26 @@ func totals(rs []QuestionResult) (raw, hdf, adhoc int) {
 		}
 	}
 	return
+}
+
+// elapsedTotals sums each arm's wall-clock across questions.
+func elapsedTotals(rs []QuestionResult) (raw, hdf, adhoc float64) {
+	for _, r := range rs {
+		raw += r.Raw.Cost.Elapsed.Seconds()
+		hdf += r.HDF.Cost.Elapsed.Seconds()
+		if r.HDFAdHoc != nil {
+			adhoc += r.HDFAdHoc.Cost.Elapsed.Seconds()
+		}
+	}
+	return
+}
+
+// ratioF is ratio for float measures.
+func ratioF(n, d float64) string {
+	if d == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2fx", n/d)
 }
 
 func frac(n, d int) string {
