@@ -19,12 +19,13 @@ import (
 // the API key is supplied by the caller (from the environment at run time) and
 // is never logged or persisted here.
 type OpenAI struct {
-	BaseURL    string // e.g. https://api.openai.com/v1, http://litellm.internal/v1
-	Model      string
-	APIKey     string // Bearer token; supplied by the caller, not hard-coded
-	MaxTokens  int    // when > 0, cap the completion — keep it generous for reasoning models so they finish rather than truncating to content:null
-	MaxRetries int    // retries on 429/5xx/transient errors (default 4); needed once arms fan out concurrently
-	HTTP       *http.Client
+	BaseURL     string // e.g. https://api.openai.com/v1, http://litellm.internal/v1
+	Model       string
+	APIKey      string   // Bearer token; supplied by the caller, not hard-coded
+	MaxTokens   int      // when > 0, cap the completion — keep it generous for reasoning models so they finish rather than truncating to content:null
+	Temperature *float64 // when non-nil, sent as-is (0 for determinism); omitted when nil, for models that reject an explicit temperature
+	MaxRetries  int      // retries on 429/5xx/transient errors (default 4); needed once arms fan out concurrently
+	HTTP        *http.Client
 }
 
 // NewOpenAI builds an OpenAI-compatible instrument. A trailing /v1 on baseURL is
@@ -77,6 +78,9 @@ func (o *OpenAI) Chat(ctx context.Context, msgs []Message, tools []Tool) (Result
 	}
 	if o.MaxTokens > 0 {
 		body["max_tokens"] = o.MaxTokens
+	}
+	if o.Temperature != nil {
+		body["temperature"] = *o.Temperature
 	}
 	if len(tools) > 0 {
 		body["tools"] = toOATools(tools)

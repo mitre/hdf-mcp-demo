@@ -22,9 +22,11 @@ package benchmark
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/mitre/hdf-mcp-demo/internal/agent"
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
@@ -44,6 +46,14 @@ type Options struct {
 	System      string // system prompt (default DefaultSystem)
 	AdHoc       bool   // also measure the conversion-included HDF cost view
 	Concurrency int    // max questions in flight at once (default 1 = serial)
+	Repeat      int    // runs per arm (default 1); >1 yields accuracy rates and cost variance
+}
+
+func (o Options) repeat() int {
+	if o.Repeat > 1 {
+		return o.Repeat
+	}
+	return 1
 }
 
 func (o Options) maxIters() int {
@@ -73,12 +83,16 @@ func (o Options) concurrency() int {
 // cannot answer it (the raw arm on an hdf-native question) — so it is excluded
 // from accuracy and its answer is reported only as hallucinate-vs-abstain.
 type ArmResult struct {
-	Arm     Arm
-	Answer  string
-	Verdict Verdict
-	Scored  bool
-	Err     string
-	Cost    agent.Result
+	Arm         Arm
+	Answer      string       // representative (modal) answer across samples
+	Verdict     Verdict      // representative (modal) verdict across samples
+	Scored      bool         // in-remit for this question's data view
+	Samples     int          // number of runs (>=1)
+	Correct     int          // runs graded Correct
+	Agreement   float64      // fraction of runs sharing the modal answer (1.0 for N=1)
+	TokenStdDev float64      // stddev of total tokens across runs (0 for N=1)
+	Err         string       // first error seen, if any run failed
+	Cost        agent.Result // mean cost across runs (Prompt/Completion/ToolCalls/Iterations/Elapsed)
 }
 
 // QuestionResult is one graded question across the arms.
@@ -183,15 +197,91 @@ func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB a
 	return qr, nil
 }
 
-// runArm runs one agent arm and grades its answer. An error (including a timeout)
-// is captured as a Failed outcome with whatever tokens were spent — never
-// propagated, so one over-context arm can't sink the whole run.
+// runArm runs one agent arm opts.Repeat times and aggregates: the modal verdict
+// and answer, the count graded Correct, answer agreement (consistency), mean cost,
+// and token stddev. An error (including a timeout) is a Failed sample with whatever
+// tokens were spent — never propagated, so one over-context arm can't sink the run.
 func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind) ArmResult {
-	res, err := agent.Run(ctx, inst, tb, opts.system(), prompt, opts.maxIters())
-	if err != nil {
-		return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Failed, Scored: key.Answerable, Err: err.Error(), Cost: res}
+	n := opts.repeat()
+	agg := ArmResult{Arm: arm, Scored: key.Answerable, Samples: n}
+	verdicts := map[Verdict]int{}
+	answers := map[string]int{}
+	var totals []int
+	var sumPrompt, sumCompl, sumTool, sumIter int
+	var sumElapsed time.Duration
+	for i := 0; i < n; i++ {
+		res, err := agent.Run(ctx, inst, tb, opts.system(), prompt, opts.maxIters())
+		v := Grade(res.Answer, key, kind)
+		if err != nil {
+			v = Failed
+			if agg.Err == "" {
+				agg.Err = err.Error()
+			}
+		}
+		verdicts[v]++
+		if v == Correct {
+			agg.Correct++
+		}
+		answers[res.Answer]++
+		totals = append(totals, res.TotalTokens())
+		sumPrompt += res.PromptTokens
+		sumCompl += res.CompletionTokens
+		sumTool += res.ToolCalls
+		sumIter += res.Iterations
+		sumElapsed += res.Elapsed
 	}
-	return ArmResult{Arm: arm, Answer: res.Answer, Verdict: Grade(res.Answer, key, kind), Scored: key.Answerable, Cost: res}
+	agg.Verdict = modal(verdicts)
+	agg.Answer = modalStr(answers)
+	agg.Agreement = float64(answers[agg.Answer]) / float64(n)
+	agg.TokenStdDev = stddev(totals)
+	agg.Cost = agent.Result{
+		PromptTokens: sumPrompt / n, CompletionTokens: sumCompl / n,
+		ToolCalls: sumTool / n, Iterations: sumIter / n, Elapsed: sumElapsed / time.Duration(n),
+	}
+	return agg
+}
+
+// modal returns the most frequent verdict (ties broken by a fixed severity order
+// so the display is deterministic).
+func modal(m map[Verdict]int) Verdict {
+	order := []Verdict{Correct, Wrong, Hallucinated, Abstained, Failed}
+	best, bestN := Verdict(""), -1
+	for _, v := range order {
+		if m[v] > bestN {
+			best, bestN = v, m[v]
+		}
+	}
+	return best
+}
+
+// modalStr returns the most frequent string (first-seen wins ties via iteration
+// guard); empty map yields "".
+func modalStr(m map[string]int) string {
+	best, bestN := "", -1
+	for s, c := range m {
+		if c > bestN {
+			best, bestN = s, c
+		}
+	}
+	return best
+}
+
+// stddev is the population standard deviation of xs (0 for <2 samples).
+func stddev(xs []int) float64 {
+	if len(xs) < 2 {
+		return 0
+	}
+	var sum float64
+	for _, x := range xs {
+		sum += float64(x)
+	}
+	mean := sum / float64(len(xs))
+	var sq float64
+	for _, x := range xs {
+		d := float64(x) - mean
+		sq += d * d
+	}
+	return math.Sqrt(sq / float64(len(xs)))
 }
 
 // stageAndConvert copies each referenced raw fixture under root and normalizes it

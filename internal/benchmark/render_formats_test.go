@@ -11,7 +11,11 @@ import (
 
 func sampleRuns() []ModelRun {
 	arm := func(a Arm, v Verdict, scored bool, prompt, compl int) ArmResult {
-		return ArmResult{Arm: a, Verdict: v, Scored: scored, Answer: "x",
+		c := 0
+		if v == Correct {
+			c = 1
+		}
+		return ArmResult{Arm: a, Verdict: v, Scored: scored, Samples: 1, Correct: c, Agreement: 1, Answer: "x",
 			Cost: agent.Result{PromptTokens: prompt, CompletionTokens: compl, ToolCalls: 1, Iterations: 1}}
 	}
 	results := []QuestionResult{
@@ -44,8 +48,8 @@ func TestRenderJSON(t *testing.T) {
 				ID   string `json:"id"`
 				Type string `json:"type"`
 				Raw  struct {
-					TotalTokens int  `json:"totalTokens"`
-					Scored      bool `json:"scored"`
+					MeanTotalTokens int  `json:"meanTotalTokens"`
+					Scored          bool `json:"scored"`
 				} `json:"raw"`
 			} `json:"questions"`
 			Summary struct {
@@ -104,8 +108,8 @@ func TestClassD_RawOnly(t *testing.T) {
 
 	rs := []QuestionResult{{
 		ID: "d1", Ask: "?", Class: truth.ClassD,
-		Raw: ArmResult{Arm: ArmRaw, Verdict: Correct, Scored: true, Cost: agent.Result{PromptTokens: 10}},
-		HDF: ArmResult{Arm: ArmHDF, Verdict: Hallucinated, Scored: false, Cost: agent.Result{PromptTokens: 20}},
+		Raw: ArmResult{Arm: ArmRaw, Verdict: Correct, Scored: true, Samples: 1, Correct: 1, Cost: agent.Result{PromptTokens: 10}},
+		HDF: ArmResult{Arm: ArmHDF, Verdict: Hallucinated, Scored: false, Samples: 1, Cost: agent.Result{PromptTokens: 20}},
 	}}
 	if rc, rn := scoredAccuracy(rs, ArmRaw); rc != 1 || rn != 1 {
 		t.Errorf("raw scored = %d/%d, want 1/1", rc, rn)

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,12 +43,16 @@ func main() {
 	perModel := flag.Duration("model-timeout", 0, "optional per-model timeout; 0 = share the overall -timeout across all models")
 	format := flag.String("format", "text", "output format: text | json | markdown")
 	outPath := flag.String("out", "", "write results to this file instead of stdout (progress still goes to stderr)")
+	overwrite := flag.Bool("overwrite", false, "allow -out to overwrite an existing file")
+	repeat := flag.Int("repeat", 1, "runs per question per arm; >1 reports accuracy as a rate and cost as mean±stddev")
+	temperature := flag.Float64("temperature", 0, "sampling temperature (0 = deterministic); negative to omit it entirely for models that reject it")
 	flag.Parse()
 
 	cfg := runConfig{
 		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
 		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
-		format: strings.ToLower(*format), outPath: *outPath,
+		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
+		repeat: *repeat, temperature: *temperature,
 	}
 	if err := run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -65,6 +70,9 @@ type runConfig struct {
 	timeout, perModel time.Duration
 	format            string
 	outPath           string
+	overwrite         bool
+	repeat            int
+	temperature       float64
 }
 
 // splitModels parses the comma-separated -models flag, trimming blanks.
@@ -78,21 +86,51 @@ func splitModels(s string) []string {
 	return out
 }
 
+// preflight validates every cheap precondition BEFORE the expensive model run, so
+// a config mistake (missing endpoint, bad format, an -out file that already
+// exists) fails in the first second instead of after an hour. It returns the
+// located hdf binary.
+func preflight(cfg runConfig, base string, models []string) (string, error) {
+	if base == "" || len(models) == 0 {
+		return "", fmt.Errorf("set OPENAI_BASE_URL and OPENAI_MODEL or OPENAI_MODEL_LIST (or pass -models); and OPENAI_API_KEY if required")
+	}
+	switch cfg.format {
+	case "text", "json", "markdown", "md":
+	default:
+		return "", fmt.Errorf("unknown -format %q (want text | json | markdown)", cfg.format)
+	}
+	if cfg.repeat < 1 {
+		return "", fmt.Errorf("-repeat must be >= 1")
+	}
+	if cfg.outPath != "" {
+		if _, err := os.Stat(cfg.outPath); err == nil && !cfg.overwrite {
+			return "", fmt.Errorf("output file %q already exists; pass -overwrite to replace it", cfg.outPath)
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat -out %q: %w", cfg.outPath, err)
+		}
+		if dir := filepath.Dir(cfg.outPath); dir != "" {
+			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+				return "", fmt.Errorf("output directory %q does not exist", dir)
+			}
+		}
+	}
+	if fi, err := os.Stat(cfg.fixturesDir); err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("fixtures directory %q not found (pass -fixtures)", cfg.fixturesDir)
+	}
+	bin, err := locateHDF()
+	if err != nil {
+		return "", err
+	}
+	return bin, nil
+}
+
 func run(cfg runConfig) error {
 	base := os.Getenv("OPENAI_BASE_URL")
 	models := cfg.models
 	if len(models) == 0 {
 		models = instrument.ModelsFromEnv()
 	}
-	if base == "" || len(models) == 0 {
-		return fmt.Errorf("set OPENAI_BASE_URL and OPENAI_MODEL or OPENAI_MODEL_LIST (or pass -models); and OPENAI_API_KEY if required")
-	}
-	switch cfg.format {
-	case "text", "json", "markdown", "md":
-	default:
-		return fmt.Errorf("unknown -format %q (want text | json | markdown)", cfg.format)
-	}
-	bin, err := locateHDF()
+	bin, err := preflight(cfg, base, models)
 	if err != nil {
 		return err
 	}
@@ -114,7 +152,7 @@ func run(cfg runConfig) error {
 	defer func() { _ = sess.Close() }()
 
 	bank := benchmark.Bank()
-	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency}
+	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency, Repeat: cfg.repeat}
 
 	// Echo exactly what will run (to stderr, so stdout stays clean for json/markdown)
 	// — catches a stale OPENAI_MODEL_LIST silently overriding an intended single model.
@@ -124,6 +162,7 @@ func run(cfg runConfig) error {
 	meta := benchmark.RunMeta{
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Models: models,
 		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
+		Repeat: cfg.repeat, Temperature: cfg.temperature,
 	}
 	incremental := cfg.format == "text" && cfg.outPath == ""
 	if incremental {
@@ -133,6 +172,10 @@ func run(cfg runConfig) error {
 	for _, model := range models {
 		inst := instrument.NewOpenAI(base, model, os.Getenv("OPENAI_API_KEY"))
 		inst.MaxTokens = cfg.maxTokens
+		if cfg.temperature >= 0 { // negative sentinel = omit temperature entirely
+			t := cfg.temperature
+			inst.Temperature = &t
+		}
 
 		// A per-model timeout (if set) isolates a slow/cold model so it can't spend
 		// the whole budget and starve the rest; a failure is reported and skipped

@@ -164,18 +164,17 @@ func armOf(r QuestionResult, a Arm) ArmResult {
 	return r.Raw
 }
 
-// scoredAccuracy returns correct answers and the number of in-remit (scored)
-// questions for an arm — questions out of the arm's remit are excluded.
+// scoredAccuracy returns correct answers and the number of scored samples for an
+// arm — summed over runs (Samples) so a -repeat run reports a sample-level rate.
+// Questions out of the arm's remit are excluded.
 func scoredAccuracy(rs []QuestionResult, arm Arm) (correct, scored int) {
 	for _, r := range rs {
 		a := armOf(r, arm)
 		if !a.Scored {
 			continue
 		}
-		scored++
-		if a.Verdict == Correct {
-			correct++
-		}
+		scored += a.Samples
+		correct += a.Correct
 	}
 	return
 }

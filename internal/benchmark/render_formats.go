@@ -25,6 +25,8 @@ type RunMeta struct {
 	MaxTokens   int
 	MaxIters    int
 	AdHoc       bool
+	Repeat      int
+	Temperature float64
 }
 
 // MetaText renders the run metadata as a short plain-text header.
@@ -35,9 +37,17 @@ func MetaText(m RunMeta) string {
 		fmt.Fprintf(&b, "  timestamp: %s\n", m.Timestamp)
 	}
 	fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
-	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v\n",
-		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc)
+	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s\n",
+		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature))
 	return b.String()
+}
+
+// tempStr renders a temperature, or "omitted" for the negative sentinel.
+func tempStr(t float64) string {
+	if t < 0 {
+		return "omitted"
+	}
+	return fmt.Sprintf("%.2g", t)
 }
 
 // --- JSON ---
@@ -49,6 +59,8 @@ type jsonMeta struct {
 	MaxTokens   int      `json:"maxTokens"`
 	MaxIters    int      `json:"maxIters"`
 	AdHoc       bool     `json:"adHoc"`
+	Repeat      int      `json:"repeat"`
+	Temperature float64  `json:"temperature"`
 }
 
 type jsonAnswer struct {
@@ -60,14 +72,18 @@ type jsonArm struct {
 	Arm              string  `json:"arm"`
 	Verdict          string  `json:"verdict"`
 	Scored           bool    `json:"scored"`
+	Samples          int     `json:"samples"`
+	Correct          int     `json:"correct"`
+	Agreement        float64 `json:"agreement"`
 	Answer           string  `json:"answer"`
 	Error            string  `json:"error,omitempty"`
-	PromptTokens     int     `json:"promptTokens"`
-	CompletionTokens int     `json:"completionTokens"`
-	TotalTokens      int     `json:"totalTokens"`
-	ToolCalls        int     `json:"toolCalls"`
-	Iterations       int     `json:"iterations"`
-	ElapsedSeconds   float64 `json:"elapsedSeconds"`
+	MeanPromptTokens int     `json:"meanPromptTokens"`
+	MeanCompletion   int     `json:"meanCompletionTokens"`
+	MeanTotalTokens  int     `json:"meanTotalTokens"`
+	TokenStdDev      float64 `json:"tokenStdDev"`
+	MeanToolCalls    int     `json:"meanToolCalls"`
+	MeanIterations   int     `json:"meanIterations"`
+	MeanElapsedSec   float64 `json:"meanElapsedSeconds"`
 }
 
 type jsonQuestion struct {
@@ -131,10 +147,13 @@ func toJSONAnswer(a truth.Answer) jsonAnswer {
 
 func toJSONArm(a ArmResult) jsonArm {
 	return jsonArm{
-		Arm: string(a.Arm), Verdict: string(a.Verdict), Scored: a.Scored, Answer: a.Answer, Error: a.Err,
-		PromptTokens: a.Cost.PromptTokens, CompletionTokens: a.Cost.CompletionTokens,
-		TotalTokens: a.Cost.TotalTokens(), ToolCalls: a.Cost.ToolCalls,
-		Iterations: a.Cost.Iterations, ElapsedSeconds: a.Cost.Elapsed.Seconds(),
+		Arm: string(a.Arm), Verdict: string(a.Verdict), Scored: a.Scored,
+		Samples: a.Samples, Correct: a.Correct, Agreement: a.Agreement,
+		Answer: a.Answer, Error: a.Err,
+		MeanPromptTokens: a.Cost.PromptTokens, MeanCompletion: a.Cost.CompletionTokens,
+		MeanTotalTokens: a.Cost.TotalTokens(), TokenStdDev: a.TokenStdDev,
+		MeanToolCalls: a.Cost.ToolCalls, MeanIterations: a.Cost.Iterations,
+		MeanElapsedSec: a.Cost.Elapsed.Seconds(),
 	}
 }
 
@@ -155,6 +174,7 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 	report := jsonReport{Meta: jsonMeta{
 		Timestamp: meta.Timestamp, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
+		Repeat: meta.Repeat, Temperature: meta.Temperature,
 	}}
 	for _, run := range runs {
 		jr := jsonRun{Model: run.Model}
@@ -219,8 +239,8 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 		fmt.Fprintf(&b, "- **timestamp:** %s\n", meta.Timestamp)
 	}
 	fmt.Fprintf(&b, "- **models:** %s\n", strings.Join(meta.Models, ", "))
-	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v\n\n",
-		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc)
+	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s\n\n",
+		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature))
 
 	for _, run := range runs {
 		fmt.Fprintf(&b, "## %s (%d questions)\n\n", run.Model, len(run.Results))
