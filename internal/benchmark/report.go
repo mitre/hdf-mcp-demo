@@ -66,9 +66,16 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 			hall, abst, outOf)
 	}
 
-	// Failed arms (errored/over-context/timeout) among scored questions.
+	// Failed arms (errored/over-context/timeout) among scored questions, followed
+	// by the distinct reasons so an all-failed run is diagnosable ("connection
+	// refused" vs. "reached max iterations") rather than a wall of "failed".
 	if rf, hf := failures(results, ArmRaw), failures(results, ArmHDF); rf > 0 || hf > 0 {
 		fmt.Fprintf(&b, "failed (errored/over-context/timeout): raw %d, hdf %d\n", rf, hf)
+		for _, arm := range []Arm{ArmRaw, ArmHDF} {
+			for _, fr := range failureDetail(results, arm) {
+				fmt.Fprintf(&b, "  %-3s %d×  %s\n", armShort(arm), fr.Count, fr.Msg)
+			}
+		}
 	}
 
 	// Cost views.
@@ -219,6 +226,52 @@ func failures(rs []QuestionResult, arm Arm) int {
 		}
 	}
 	return n
+}
+
+// failureReason is one distinct error message among an arm's failed questions,
+// with how many questions shared it.
+type failureReason struct {
+	Msg   string
+	Count int
+}
+
+// failureDetail collects the distinct errors among an arm's failed questions,
+// most frequent first (message-sorted within a count for determinism). A single
+// endpoint outage collapses to one line; a mix of transport errors and max-iters
+// timeouts shows each. This is what turns the report's bare "failed" count into
+// something a reader can act on.
+func failureDetail(rs []QuestionResult, arm Arm) []failureReason {
+	counts := map[string]int{}
+	for _, r := range rs {
+		a := armOf(r, arm)
+		if a.Verdict != Failed {
+			continue
+		}
+		msg := a.Err
+		if msg == "" {
+			msg = "(no error recorded)"
+		}
+		counts[msg]++
+	}
+	out := make([]failureReason, 0, len(counts))
+	for m, c := range counts {
+		out = append(out, failureReason{Msg: m, Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Msg < out[j].Msg
+	})
+	return out
+}
+
+// armShort is the compact arm tag used in the failure-reason lines.
+func armShort(a Arm) string {
+	if a == ArmHDF {
+		return "hdf"
+	}
+	return "raw"
 }
 
 func totals(rs []QuestionResult) (raw, hdf, adhoc int) {

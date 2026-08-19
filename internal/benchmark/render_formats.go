@@ -332,6 +332,16 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 		}
 		if rf, hf := failures(run.Results, ArmRaw), failures(run.Results, ArmHDF); rf > 0 || hf > 0 {
 			fmt.Fprintf(&b, "\n_Failed (errored/over-context/timeout): raw %d, hdf %d._\n", rf, hf)
+			var reasons []string
+			for _, arm := range []Arm{ArmRaw, ArmHDF} {
+				for _, fr := range failureDetail(run.Results, arm) {
+					reasons = append(reasons, fmt.Sprintf("- %s ×%d — %s", armShort(arm), fr.Count, fr.Msg))
+				}
+			}
+			if len(reasons) > 0 {
+				b.WriteString("\n**Failure reasons** (first error per failed arm)\n\n")
+				b.WriteString(strings.Join(reasons, "\n") + "\n")
+			}
 		}
 
 		rawTok, hdfTok, adhocTok := totals(run.Results)

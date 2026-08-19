@@ -216,3 +216,37 @@ func TestWallClockReported(t *testing.T) {
 		t.Errorf("markdown report omits wall-clock:\n%s", got)
 	}
 }
+
+// TestFailureReasonsSurfaced pins the diagnosability fix: an all-failed run must
+// say WHY each arm failed — the transport error vs. the max-iters timeout — not
+// just print "failed". Without this a run where the endpoint was down and a run
+// where the HDF arm never converged are indistinguishable in the human report,
+// which is exactly the wall of "failed" the first live runs produced. The two
+// distinct reasons must appear; a reason shared across questions is deduped to a
+// single counted line rather than repeated per question.
+func TestFailureReasonsSurfaced(t *testing.T) {
+	const transport = "dial tcp 127.0.0.1:4000: connect: connection refused"
+	const maxIters = "reached max iterations (6) without a final answer"
+	failed := func(a Arm, msg string) ArmResult {
+		return ArmResult{Arm: a, Verdict: Failed, Scored: true, Samples: 1, Err: msg}
+	}
+	q := func(id string) QuestionResult {
+		return QuestionResult{ID: id, Ask: "?", Class: truth.ClassA,
+			RawView: truth.Answered("1"), HDFView: truth.Answered("1"),
+			Raw: failed(ArmRaw, transport), HDF: failed(ArmHDF, maxIters)}
+	}
+	runs := []ModelRun{{Model: "stub", Results: []QuestionResult{q("q1"), q("q2")}}}
+
+	text := Render(runs[0].Model, runs[0].Results, false)
+	md := RenderMarkdown(RunMeta{Models: []string{"stub"}}, runs, false)
+	for _, out := range []struct{ name, s string }{{"text", text}, {"markdown", md}} {
+		for _, want := range []string{transport, maxIters} {
+			if !strings.Contains(out.s, want) {
+				t.Errorf("%s report omitted failure reason %q:\n%s", out.name, want, out.s)
+			}
+		}
+		if n := strings.Count(out.s, transport); n != 1 {
+			t.Errorf("%s report should dedupe the shared raw error to one line, saw %d:\n%s", out.name, n, out.s)
+		}
+	}
+}
