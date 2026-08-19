@@ -9,7 +9,7 @@ It gives you two numbers, and they answer different questions:
 | | What it measures | What it needs |
 |---|---|---|
 | [Ingest ceiling](#the-ingest-ceiling-offline-model-free) (`./run.sh`) | Best-case bytes saved, under ideal play by both sides | Nothing — offline, seconds |
-| [Graded study](#the-graded-study-run-it-on-your-own-hardware) (`./bench.sh`) | Whether a real model gets the right answer, and what it actually spent | A local model via Ollama |
+| [Graded study](#the-graded-study-run-it-on-your-own-hardware) (`./bench.sh`) | Whether a real model gets the right answer, and what it actually spent | A local model via Ollama, or any OpenAI-compatible endpoint (e.g. LiteLLM) |
 
 The ceiling is large. The graded result is the honest one, and on small scans it can favour the raw arm. Both are here on purpose.
 
@@ -46,9 +46,8 @@ Security pipelines produce *unlike* scan output — SAST, DAST, SBOM, vulnerabil
 
 **2. Normalize once, then query.** Bring every source into HDF first, then ask questions against the normalized documents:
 
-- Scan formats (gosec, ZAP, Grype, …) → the **`hdf_convert`** tool.
+- Scan formats (gosec, ZAP, Grype, InSpec, any other scan tool that can convert to HDF…) → the **`hdf_convert`** tool.
 - SBOMs (SPDX/CycloneDX) → **`hdf system create --from spdx`** (inventory becomes an HDF *System* document).
-- Legacy InSpec ExecJSON → **`hdf convert`** (auto-detected).
 
 **3. Pass handles, not documents.** Every tool returns a compact **summary plus a reusable handle** — never a multi-megabyte body. Reuse the handle across a multi-step workflow instead of re-sending the document.
 
@@ -119,6 +118,33 @@ export HDF_BIN="$PWD/../hdf-libs/hdf-cli/hdf"
 ```
 
 Results land in `results/` as markdown. `cmd/benchmark` is also usable directly (`go run ./cmd/benchmark -provider ollama -models gpt-oss:20b`), and speaks to any OpenAI-compatible gateway with `-provider openai`.
+
+### The eleven questions
+
+One constraint shapes the whole bank: every question's ground truth must be **computable from the data by code** — once over the raw scanner output, once over the converted HDF document — never asserted by hand and never judged by an LLM. That limits the bank to question shapes with closed-form answers (counts, existence, thresholds, rates), which is also why there are eleven questions and not fifty. Where the two computed answers agree, the question is *objective*; where they legitimately differ, it is *interpretive* and graded to its stated intent; where only one view can express an answer at all, it is *hdf-only*. The classification is recomputed from the data at run time, so a converter change that altered the semantics would reclassify the question rather than silently grade against a stale key.
+
+| Question | Asks | Type | Why it is in the bank |
+|---|---|---|---|
+| `gosec-distinct-rules` | distinct rule violations in the gosec scan | interpretive (key = 3, the HDF view) | gosec emits one finding per code site; conversion dedups to rule level (7 findings → 3 rules). Asking for *distinct rules* matches HDF's shape — the raw arm must dedup by hand. |
+| `gosec-total-findings` | total findings the scanner emitted, pre-dedup | interpretive (key = 7, the raw view) | The same divergence graded the **other** way: here the raw count is the intended answer and HDF's dedup produces the wrong number. Paired with the above so the study never reports only the HDF-flattering direction. |
+| `grype-match-count` | vulnerability matches in the grype scan | objective (89) | grype does not dedup, so raw == HDF. The contrast with gosec shows divergence is a property of the *scanner's* output shape, not of normalization in general. |
+| `grype-cve-present` | is CVE-2021-36159 present? | objective (yes) | Needle-in-a-haystack existence over a ~1 MB scan — the everyday lookup shape. |
+| `grype-has-critical` | any Critical-severity finding? | objective | Severity threshold across mapped vocabularies: the raw arm greps severity strings, the HDF arm filters impact ≥ 0.9. Tests whether the mapping survives an agent round-trip. |
+| `grype-compliance-rate` | what percentage of the scan is passing? | hdf-only | A vuln scanner has no native pass rate; HDF's normalization adds one. The raw arm is out of remit — measured on whether it honestly declines or invents a rate. |
+| `grype-related-vulns` | matches listing at least one related vulnerability (45) | objective — **expected HDF loss** | Category 5, the honest counter-example. Conversion preserves the field byte-for-byte inside the requirement's `code`, but no HDF read tool projects `code` — so the HDF arm must get there through a bounded surface that doesn't expose the answer. Graded, not excused. |
+| `zap-alert-count` | alerts in the ZAP scan | objective | A second no-dedup scanner from a different tool family (DAST), so the answer-preserving case isn't a single-scanner artifact. |
+| `zap-high-severity-count` | high-risk alerts in the ZAP scan | objective | Count-above-threshold over ZAP's numeric riskcodes vs. HDF impact ≥ 0.7 — vocabulary mapping on a *count*, stricter than mere existence. |
+| `inspec-control-count` | controls in the InSpec compliance run | objective (192) | The large-document regime: a 1.2 MB compliance run. Everything else is small enough that grep competes; this is the scale bounded tool responses are actually for. |
+| `inspec-compliance-rate` | percentage of InSpec results passing | objective (80%) | The rate question where the raw arm **can** answer — a compliance run states pass/fail natively — making it the fair counterpart to the hdf-only grype rate. |
+
+Why this particular selection, compressed:
+
+- **Every grading class is occupied, and interpretive runs both directions.** The gosec pair grades the identical 7-vs-3 divergence once in HDF's favor and once in raw's, so the taxonomy can't be gamed by question wording.
+- **The expected loss is in the bank and graded.** `grype-related-vulns` exists so the study measures where HDF's bounded read surface hurts, instead of only sampling questions the tools are good at.
+- **Four tool families, two output shapes.** SAST (gosec, dedups), vuln scan (grype, doesn't), DAST (ZAP, doesn't), compliance (InSpec, already rule-shaped) — so "normalization changes the answer" appears exactly where the scanner's shape predicts it, and nowhere else.
+- **Three size regimes.** Small (gosec, ZAP), medium (grype, ~155k tokens raw), large (InSpec, 1.2 MB) — the raw arm's viability degrades with size, and the bank has to cover the whole ramp for that to show up in the accuracy table.
+
+What's deliberately *not* here: prose questions ("summarize the risk posture") that would need an LLM judge, and a genuine raw-only question (a field HDF *drops*), because these converters are near-lossless — the closest real case is `grype-related-vulns`, where the field survives conversion but not the read surface.
 
 ### Picking a model
 
