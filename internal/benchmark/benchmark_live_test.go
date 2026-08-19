@@ -56,7 +56,7 @@ func TestBenchmark_Live(t *testing.T) {
 				t.Fatalf("run: %v", err)
 			}
 			SortByID(results)
-			t.Logf("\n%s", Render(inst.Name(), results, false))
+			t.Logf("\n%s", Render(inst.Name(), results, false, nil))
 
 			if len(results) != len(bank) {
 				t.Fatalf("got %d results, want %d", len(results), len(bank))

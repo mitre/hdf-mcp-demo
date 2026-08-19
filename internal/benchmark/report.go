@@ -10,14 +10,24 @@ import (
 
 // Render formats a model's results: a per-question detail table, per-question-type
 // accuracy for each arm (scored only over questions the arm can answer), both
-// token-cost views, and an honesty footer. model names the instrument.
-func Render(model string, results []QuestionResult, adHoc bool) string {
+// token-cost views, the bookend check (when bks is non-nil), and an honesty
+// footer. model names the instrument.
+func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "model: %s   (%d questions)\n\n", model, len(results))
 
 	// Per-question detail. mult is that question's hdfTok/rawTok — the aggregate
-	// cost ratio hides which questions are the peaks and valleys.
+	// cost ratio hides which questions are the peaks and valleys. When bookends
+	// were computed, vsCeil and vsOracle locate each arm against its model-free
+	// assumption (raw spend / whole-file ceiling; hdf spend / hand-optimal oracle).
+	bkByID := make(map[string]Bookend, len(bks))
+	for _, bk := range bks {
+		bkByID[bk.ID] = bk
+	}
 	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s %7s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "mult", "rawSec", "hdfSec")
+	if len(bks) > 0 {
+		hdr += fmt.Sprintf(" %8s %8s", "vsCeil", "vsOracle")
+	}
 	if adHoc {
 		hdr += fmt.Sprintf(" %8s", "adhocTok")
 	}
@@ -28,6 +38,10 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
 			ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 			r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
+		if len(bks) > 0 {
+			vc, vo := questionBookendRatios(r, bkByID)
+			line += fmt.Sprintf(" %8s %8s", vc, vo)
+		}
 		if adHoc {
 			ah := 0
 			if r.HDFAdHoc != nil {
@@ -100,7 +114,11 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 		fmt.Fprintf(&b, "  hdf-mcp arm (ad-hoc convert) . %8.1f   %s vs raw\n", adhocSec, ratioF(adhocSec, rawSec))
 	}
 
-	b.WriteString(footer(adHoc))
+	if c, ok := checkBookends(results, bks); ok {
+		b.WriteString(renderBookendCheckText(c))
+	}
+
+	b.WriteString(footer(adHoc, len(bks) > 0))
 	return b.String()
 }
 
@@ -137,7 +155,7 @@ func classRowLabel(c truth.Class) string {
 // allClasses is the display order for the accuracy tables.
 var allClasses = []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC, truth.ClassD}
 
-func footer(adHoc bool) string {
+func footer(adHoc, bookends bool) string {
 	lines := []string{
 		"",
 		"notes / limitations (read before trusting a number):",
@@ -164,6 +182,14 @@ func footer(adHoc bool) string {
 		lines = append(lines,
 			"  - Pipeline view assumes conversion happened out-of-band (cost ~0/query); ad-hoc",
 			"    view charges the agent's on-demand hdf_convert round-trip.")
+	}
+	if bookends {
+		lines = append(lines,
+			"  - Bookends are counted in O200k tokens; real usage comes from each model's own",
+			"    tokenizer, so bookend ratios are approximate.",
+			"  - hdf-vs-oracle > 1 even for perfect play: real arms pay the tool-schema tax",
+			"    and multi-turn accumulation the oracle excludes — that gap is part of what",
+			"    is being measured, not noise.")
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

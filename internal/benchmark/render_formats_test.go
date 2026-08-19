@@ -34,7 +34,7 @@ func sampleRuns() []ModelRun {
 
 func TestRenderJSON(t *testing.T) {
 	meta := RunMeta{Models: []string{"stub"}, Concurrency: 4, MaxTokens: 1024, MaxIters: 6}
-	s, err := RenderJSON(meta, sampleRuns(), false)
+	s, err := RenderJSON(meta, sampleRuns(), false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestClassD_RawOnly(t *testing.T) {
 	if _, _, hOut := remit(rs, ArmHDF); hOut != 1 {
 		t.Errorf("hdf out-of-remit total = %d, want 1", hOut)
 	}
-	js, err := RenderJSON(RunMeta{Models: []string{"m"}}, []ModelRun{{Model: "m", Results: rs}}, false)
+	js, err := RenderJSON(RunMeta{Models: []string{"m"}}, []ModelRun{{Model: "m", Results: rs}}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestClassD_RawOnly(t *testing.T) {
 
 func TestRenderMarkdown(t *testing.T) {
 	meta := RunMeta{Models: []string{"stub"}, Concurrency: 4, MaxTokens: 1024, MaxIters: 6}
-	md := RenderMarkdown(meta, sampleRuns(), false)
+	md := RenderMarkdown(meta, sampleRuns(), false, nil)
 	for _, must := range []string{
 		"# HDF-MCP benchmark", "**models:** stub", "## stub", "| question | type |",
 		"objective", "interpretive", "hdf-only", "out of remit", "Notes / limitations",
@@ -154,10 +154,10 @@ func TestMetaNumCtx(t *testing.T) {
 	if got := MetaText(set); !strings.Contains(got, "num-ctx=32768") {
 		t.Errorf("MetaText omitted num-ctx:\n%s", got)
 	}
-	if got := RenderMarkdown(set, nil, false); !strings.Contains(got, "num-ctx=32768") {
+	if got := RenderMarkdown(set, nil, false, nil); !strings.Contains(got, "num-ctx=32768") {
 		t.Errorf("RenderMarkdown omitted num-ctx:\n%s", got)
 	}
-	js, err := RenderJSON(set, nil, false)
+	js, err := RenderJSON(set, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,10 +169,10 @@ func TestMetaNumCtx(t *testing.T) {
 	if got := MetaText(unset); strings.Contains(got, "num-ctx") {
 		t.Errorf("MetaText reported num-ctx for a run without one:\n%s", got)
 	}
-	if got := RenderMarkdown(unset, nil, false); strings.Contains(got, "num-ctx") {
+	if got := RenderMarkdown(unset, nil, false, nil); strings.Contains(got, "num-ctx") {
 		t.Errorf("RenderMarkdown reported num-ctx for a run without one:\n%s", got)
 	}
-	js, err = RenderJSON(unset, nil, false)
+	js, err = RenderJSON(unset, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,10 +188,10 @@ func TestChargeStatement(t *testing.T) {
 	if got := MetaText(local); !strings.Contains(got, "zero charge") {
 		t.Errorf("local run must state zero charge:\n%s", got)
 	}
-	if got := RenderMarkdown(local, nil, false); !strings.Contains(got, "zero charge") {
+	if got := RenderMarkdown(local, nil, false, nil); !strings.Contains(got, "zero charge") {
 		t.Errorf("markdown must state zero charge:\n%s", got)
 	}
-	js, err := RenderJSON(local, nil, false)
+	js, err := RenderJSON(local, nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,10 +209,10 @@ func TestChargeStatement(t *testing.T) {
 // but only ever surfaced in JSON.
 func TestWallClockReported(t *testing.T) {
 	runs := sampleRuns()
-	if got := Render(runs[0].Model, runs[0].Results, false); !strings.Contains(got, "wall-clock") {
+	if got := Render(runs[0].Model, runs[0].Results, false, nil); !strings.Contains(got, "wall-clock") {
 		t.Errorf("text report omits wall-clock:\n%s", got)
 	}
-	if got := RenderMarkdown(RunMeta{Models: []string{"m"}}, runs, false); !strings.Contains(got, "Wall-clock") {
+	if got := RenderMarkdown(RunMeta{Models: []string{"m"}}, runs, false, nil); !strings.Contains(got, "Wall-clock") {
 		t.Errorf("markdown report omits wall-clock:\n%s", got)
 	}
 }
@@ -223,14 +223,14 @@ func TestWallClockReported(t *testing.T) {
 // arms cost raw 110 / hdf 212 → 1.93x; a zero-raw row must render n/a, not Inf.
 func TestPerQuestionMultiplier(t *testing.T) {
 	runs := sampleRuns()
-	if got := Render(runs[0].Model, runs[0].Results, false); !strings.Contains(got, "1.93x") {
+	if got := Render(runs[0].Model, runs[0].Results, false, nil); !strings.Contains(got, "1.93x") {
 		t.Errorf("text report missing per-question mult:\n%s", got)
 	}
-	md := RenderMarkdown(RunMeta{Models: []string{"stub"}}, runs, false)
+	md := RenderMarkdown(RunMeta{Models: []string{"stub"}}, runs, false, nil)
 	if !strings.Contains(md, "| mult |") || !strings.Contains(md, "| 1.93x |") {
 		t.Errorf("markdown report missing per-question mult:\n%s", md)
 	}
-	js, err := RenderJSON(RunMeta{Models: []string{"stub"}}, runs, false)
+	js, err := RenderJSON(RunMeta{Models: []string{"stub"}}, runs, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestPerQuestionMultiplier(t *testing.T) {
 		Raw: ArmResult{Arm: ArmRaw, Verdict: Failed, Scored: true, Samples: 1},
 		HDF: ArmResult{Arm: ArmHDF, Verdict: Failed, Scored: true, Samples: 1},
 	}}}}
-	if got := RenderMarkdown(RunMeta{Models: []string{"z"}}, zero, false); !strings.Contains(got, "| n/a |") {
+	if got := RenderMarkdown(RunMeta{Models: []string{"z"}}, zero, false, nil); !strings.Contains(got, "| n/a |") {
 		t.Errorf("zero-raw row should render n/a:\n%s", got)
 	}
 }
@@ -279,8 +279,8 @@ func TestFailureReasonsSurfaced(t *testing.T) {
 	}
 	runs := []ModelRun{{Model: "stub", Results: []QuestionResult{q("q1"), q("q2")}}}
 
-	text := Render(runs[0].Model, runs[0].Results, false)
-	md := RenderMarkdown(RunMeta{Models: []string{"stub"}}, runs, false)
+	text := Render(runs[0].Model, runs[0].Results, false, nil)
+	md := RenderMarkdown(RunMeta{Models: []string{"stub"}}, runs, false, nil)
 	for _, out := range []struct{ name, s string }{{"text", text}, {"markdown", md}} {
 		for _, want := range []string{transport, maxIters} {
 			if !strings.Contains(out.s, want) {

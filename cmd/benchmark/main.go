@@ -52,6 +52,7 @@ func main() {
 	temperature := flag.Float64("temperature", 0, "sampling temperature (0 = deterministic); negative to omit it entirely for models that reject it")
 	provider := flag.String("provider", "openai", "model provider: openai (OpenAI-compatible /v1 — LiteLLM, vLLM, Ollama's /v1 shim) | ollama (native /api/chat, fully local)")
 	numCtx := flag.Int("numctx", 32768, "ollama only: context window (num_ctx). Ollama's own default is 4096 whatever the model advertises, and it truncates silently — too small for the raw-file arm, so leaving it unset understates raw. 0 = defer to the server")
+	bookendsOnly := flag.Bool("bookends", false, "compute only the model-free token bookends (whole-file ceiling + hand-optimal oracle per question) and exit — needs no model, endpoint, or provider")
 	flag.Parse()
 
 	cfg := runConfig{
@@ -59,6 +60,7 @@ func main() {
 		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
 		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
 		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider), numCtx: *numCtx,
+		bookendsOnly: *bookendsOnly,
 	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = defaultConcurrency(cfg.provider)
@@ -84,6 +86,7 @@ type runConfig struct {
 	temperature       float64
 	provider          string
 	numCtx            int
+	bookendsOnly      bool
 }
 
 // endpoint resolves the provider's base URL. For ollama it is optional (the
@@ -239,23 +242,27 @@ func splitModels(s string) []string {
 // exists) fails in the first second instead of after an hour. It returns the
 // located hdf binary.
 func preflight(ctx context.Context, cfg runConfig, base string, models []string) (string, error) {
-	switch cfg.provider {
-	case "openai":
-		if base == "" {
-			return "", fmt.Errorf("set OPENAI_BASE_URL (or use -provider ollama); and OPENAI_API_KEY if the endpoint requires it")
-		}
-	case "ollama":
-		// base is optional — the adapter defaults to localhost:11434
-		if len(models) > 0 {
-			if err := checkOllamaModels(ctx, base, models); err != nil {
-				return "", err
+	// -bookends is model-free token accounting: no provider, endpoint, or model
+	// may be demanded for it.
+	if !cfg.bookendsOnly {
+		switch cfg.provider {
+		case "openai":
+			if base == "" {
+				return "", fmt.Errorf("set OPENAI_BASE_URL (or use -provider ollama); and OPENAI_API_KEY if the endpoint requires it")
 			}
+		case "ollama":
+			// base is optional — the adapter defaults to localhost:11434
+			if len(models) > 0 {
+				if err := checkOllamaModels(ctx, base, models); err != nil {
+					return "", err
+				}
+			}
+		default:
+			return "", fmt.Errorf("unknown -provider %q (want openai | ollama)", cfg.provider)
 		}
-	default:
-		return "", fmt.Errorf("unknown -provider %q (want openai | ollama)", cfg.provider)
-	}
-	if len(models) == 0 {
-		return "", fmt.Errorf("set -models (or OPENAI_MODEL / OPENAI_MODEL_LIST)")
+		if len(models) == 0 {
+			return "", fmt.Errorf("set -models (or OPENAI_MODEL / OPENAI_MODEL_LIST)")
+		}
 	}
 	switch cfg.format {
 	case "text", "json", "markdown", "md":
@@ -343,9 +350,24 @@ func run(cfg runConfig) error {
 		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
 		Repeat: cfg.repeat, Temperature: cfg.temperature, NumCtx: metaNumCtx(cfg),
 	}
+
+	// Bookends: the model-free token bracket (whole-file ceiling + hand-optimal
+	// oracle per question), computed once per run in its own root — they depend on
+	// the fixtures and the tool surface, not on any model.
+	fmt.Fprintln(os.Stderr, "computing token bookends (model-free)...")
+	bks, err := computeBookends(ctx, cfg, bin, baseRoot)
+	if err != nil {
+		return fmt.Errorf("compute bookends: %w", err)
+	}
+	if cfg.bookendsOnly {
+		meta.Provider, meta.Models = "", nil // no model ran; the meta must not imply one
+		return emit(cfg, meta, nil, bks)
+	}
+
 	incremental := cfg.format == "text" && cfg.outPath == ""
 	if incremental {
 		fmt.Println(benchmark.MetaText(meta))
+		fmt.Println(benchmark.RenderBookends(bks))
 	}
 	var runs []benchmark.ModelRun
 	for mi, model := range models {
@@ -373,7 +395,7 @@ func run(cfg runConfig) error {
 		benchmark.SortByID(results)
 		runs = append(runs, benchmark.ModelRun{Model: inst.Name(), Results: results})
 		if incremental {
-			fmt.Println(benchmark.Render(inst.Name(), results, cfg.adhoc))
+			fmt.Println(benchmark.Render(inst.Name(), results, cfg.adhoc, bks))
 			fmt.Println()
 		}
 	}
@@ -383,7 +405,23 @@ func run(cfg runConfig) error {
 	if incremental {
 		return nil // already streamed to stdout
 	}
-	return emit(cfg, meta, runs)
+	return emit(cfg, meta, runs, bks)
+}
+
+// computeBookends runs the model-free bookend pass in its own root and MCP
+// session (the per-model roots are created later and torn down independently).
+func computeBookends(ctx context.Context, cfg runConfig, bin, baseRoot string) ([]benchmark.Bookend, error) {
+	root, err := os.MkdirTemp(baseRoot, "bookends-")
+	if err != nil {
+		return nil, err
+	}
+	env := append(os.Environ(), "HDF_MCP_ROOT="+root, "HDF_MCP_ENABLE_WRITES=1")
+	sess, err := mcpclient.Connect(ctx, bin, env)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sess.Close() }()
+	return benchmark.ComputeBookends(ctx, sess, bin, cfg.fixturesDir, root, benchmark.Bank())
 }
 
 // runModel gives one model its own MCP server process and its own document root,
@@ -430,24 +468,28 @@ func indent(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// emit renders the collected runs in the chosen format and writes them to the
-// output file (or stdout).
-func emit(cfg runConfig, meta benchmark.RunMeta, runs []benchmark.ModelRun) error {
+// emit renders the collected runs (and the bookends) in the chosen format and
+// writes them to the output file (or stdout). With no runs — the -bookends mode —
+// the output is the metadata plus the bookend table alone.
+func emit(cfg runConfig, meta benchmark.RunMeta, runs []benchmark.ModelRun, bks []benchmark.Bookend) error {
 	var out string
 	switch cfg.format {
 	case "json":
-		s, err := benchmark.RenderJSON(meta, runs, cfg.adhoc)
+		s, err := benchmark.RenderJSON(meta, runs, cfg.adhoc, bks)
 		if err != nil {
 			return err
 		}
 		out = s
 	case "markdown", "md":
-		out = benchmark.RenderMarkdown(meta, runs, cfg.adhoc)
-	default: // text with -out: metadata header + per-model text tables
+		out = benchmark.RenderMarkdown(meta, runs, cfg.adhoc, bks)
+	default: // text with -out: metadata header + bookends + per-model text tables
 		var b strings.Builder
 		b.WriteString(benchmark.MetaText(meta) + "\n")
+		if len(bks) > 0 {
+			b.WriteString(benchmark.RenderBookends(bks) + "\n")
+		}
 		for _, r := range runs {
-			b.WriteString(benchmark.Render(r.Model, r.Results, cfg.adhoc))
+			b.WriteString(benchmark.Render(r.Model, r.Results, cfg.adhoc, bks))
 			b.WriteString("\n")
 		}
 		out = b.String()

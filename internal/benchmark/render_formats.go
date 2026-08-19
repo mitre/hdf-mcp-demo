@@ -41,7 +41,9 @@ func MetaText(m RunMeta) string {
 	if m.Provider != "" {
 		fmt.Fprintf(&b, "  provider:  %s\n", m.Provider)
 	}
-	fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
+	if len(m.Models) > 0 {
+		fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
+	}
 	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s%s\n",
 		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature), numCtxStr(m.NumCtx, " "))
 	if m.Provider != "" {
@@ -129,6 +131,11 @@ type jsonQuestion struct {
 	HDF      jsonArm    `json:"hdf"`
 	HDFAdHoc *jsonArm   `json:"hdfAdHoc,omitempty"`
 	HDFVsRaw float64    `json:"hdfVsRaw"` // per-question hdf/raw token multiplier (0 when raw is 0)
+	// Per-question bookend ratios, when the run computed bookends: real raw spend
+	// over the whole-file ceiling, and real hdf spend over the hand-optimal oracle
+	// (nil when the oracle is unreachable).
+	RawVsCeiling *float64 `json:"rawVsCeiling,omitempty"`
+	HDFVsOracle  *float64 `json:"hdfVsOracle,omitempty"`
 }
 
 type jsonAccuracy struct {
@@ -162,6 +169,7 @@ type jsonSummary struct {
 	RawOutOfRemit *jsonRemit                   `json:"rawOutOfRemit,omitempty"`
 	HDFOutOfRemit *jsonRemit                   `json:"hdfOutOfRemit,omitempty"`
 	Cost          jsonCost                     `json:"cost"`
+	BookendCheck  *jsonBookendCheck            `json:"bookendCheck,omitempty"`
 }
 
 type jsonRun struct {
@@ -170,9 +178,23 @@ type jsonRun struct {
 	Summary   jsonSummary    `json:"summary"`
 }
 
+type jsonBookend struct {
+	ID          string `json:"id"`
+	RawCeiling  int    `json:"rawCeilingTokens"`
+	HDFOracle   int    `json:"hdfOracleTokens,omitempty"`
+	Unreachable string `json:"oracleUnreachable,omitempty"`
+}
+
+type jsonBookendCheck struct {
+	RawArmVsCeiling float64 `json:"rawArmVsCeiling"`
+	HDFArmVsOracle  float64 `json:"hdfArmVsOracle"`
+	Reachable       int     `json:"reachableQuestions"`
+}
+
 type jsonReport struct {
-	Meta jsonMeta  `json:"meta"`
-	Runs []jsonRun `json:"runs"`
+	Meta     jsonMeta      `json:"meta"`
+	Bookends []jsonBookend `json:"bookends,omitempty"`
+	Runs     []jsonRun     `json:"runs"`
 }
 
 func toJSONAnswer(a truth.Answer) jsonAnswer {
@@ -201,16 +223,25 @@ func classAccuracy(rs []QuestionResult) jsonClassAccuracy {
 }
 
 // RenderJSON serializes the run as indented JSON — a stable, machine-readable
-// artifact carrying run metadata, every per-arm token count/verdict/scored flag,
-// per-type scored accuracy, the raw arm's out-of-remit behavior, and both cost
-// views.
-func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
+// artifact carrying run metadata, the model-free bookends, every per-arm token
+// count/verdict/scored flag, per-type scored accuracy, the raw arm's
+// out-of-remit behavior, and both cost views.
+func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) (string, error) {
 	report := jsonReport{Meta: jsonMeta{
 		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
 		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx,
 		Cost: chargeStatement(meta.Provider),
 	}}
+	for _, b := range bks {
+		report.Bookends = append(report.Bookends, jsonBookend{
+			ID: b.ID, RawCeiling: b.RawCeiling, HDFOracle: b.HDFOracle, Unreachable: b.Unreachable,
+		})
+	}
+	bkByID := make(map[string]Bookend, len(bks))
+	for _, b := range bks {
+		bkByID[b.ID] = b
+	}
 	for _, run := range runs {
 		jr := jsonRun{Model: run.Model}
 		for _, r := range run.Results {
@@ -219,6 +250,14 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 				RawView: toJSONAnswer(r.RawView), HDFView: toJSONAnswer(r.HDFView),
 				Raw: toJSONArm(r.Raw), HDF: toJSONArm(r.HDF),
 				HDFVsRaw: ratioFloat(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
+			}
+			if bk, ok := bkByID[r.ID]; ok && bk.RawCeiling > 0 {
+				v := ratioFloat(r.Raw.Cost.TotalTokens(), bk.RawCeiling)
+				jq.RawVsCeiling = &v
+				if bk.Unreachable == "" && bk.HDFOracle > 0 {
+					w := ratioFloat(r.HDF.Cost.TotalTokens(), bk.HDFOracle)
+					jq.HDFVsOracle = &w
+				}
 			}
 			if r.HDFAdHoc != nil {
 				a := toJSONArm(*r.HDFAdHoc)
@@ -239,6 +278,13 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 			cost.HDFAdHocTokens, cost.HDFAdHocVsRaw = &at, &av
 		}
 		summary := jsonSummary{ByType: byType, All: classAccuracy(run.Results), Cost: cost}
+		if c, ok := checkBookends(run.Results, bks); ok {
+			summary.BookendCheck = &jsonBookendCheck{
+				RawArmVsCeiling: ratioFloat(c.RawSpent, c.RawCeiling),
+				HDFArmVsOracle:  ratioFloat(c.HDFSpent, c.OracleTotal),
+				Reachable:       c.Reachable,
+			}
+		}
 		if hall, abst, outOf := remit(run.Results, ArmRaw); outOf > 0 {
 			summary.RawOutOfRemit = &jsonRemit{Hallucinated: hall, Abstained: abst, Total: outOf}
 		}
@@ -265,10 +311,11 @@ func ratioFloat(n, d int) float64 {
 
 // --- Markdown ---
 
-// RenderMarkdown renders the run as GitHub-flavored markdown: a metadata header, a
-// per-model detail table, a per-type scored-accuracy table, the raw arm's
-// out-of-remit line, a cost list, and the shared limitations note.
-func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
+// RenderMarkdown renders the run as GitHub-flavored markdown: a metadata header,
+// the model-free bookend table, a per-model detail table, a per-type
+// scored-accuracy table, the raw arm's out-of-remit line, a cost list, the
+// bookend check, and the shared limitations note.
+func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) string {
 	var b strings.Builder
 	b.WriteString("# HDF-MCP benchmark\n\n")
 	if meta.Timestamp != "" {
@@ -285,21 +332,48 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 	}
 	b.WriteString("\n")
 
+	bkByID := make(map[string]Bookend, len(bks))
+	for _, bk := range bks {
+		bkByID[bk.ID] = bk
+	}
+	if len(bks) > 0 {
+		b.WriteString("## Bookends (model-free)\n\n")
+		b.WriteString("rawCeil = whole raw file(s) tokenized; oracle = the hand-written optimal call's response; idealMult = oracle/rawCeil, directly comparable to each question's real mult.\n\n")
+		b.WriteString("| question | rawCeil | oracle | idealMult | note |\n|---|--:|--:|--:|---|\n")
+		for _, bk := range bks {
+			if bk.Unreachable != "" {
+				fmt.Fprintf(&b, "| %s | %d | — | — | oracle unreachable: %s |\n", bk.ID, bk.RawCeiling, bk.Unreachable)
+				continue
+			}
+			fmt.Fprintf(&b, "| %s | %d | %d | %s | |\n", bk.ID, bk.RawCeiling, bk.HDFOracle, multStr(bk.HDFOracle, bk.RawCeiling))
+		}
+		b.WriteString("\n")
+	}
+
 	for _, run := range runs {
 		fmt.Fprintf(&b, "## %s (%d questions)\n\n", run.Model, len(run.Results))
 
+		bkCols := ""
+		bkDashes := ""
+		if len(bks) > 0 {
+			bkCols, bkDashes = " vsCeil | vsOracle |", "--:|--:|"
+		}
 		if adHoc {
-			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | mult | rawSec | hdfSec | adhocTok |\n")
-			b.WriteString("|---|---|---|---|--:|--:|--:|--:|--:|--:|\n")
+			fmt.Fprintf(&b, "| question | type | raw | hdf | rawTok | hdfTok | mult | rawSec | hdfSec |%s adhocTok |\n", bkCols)
+			fmt.Fprintf(&b, "|---|---|---|---|--:|--:|--:|--:|--:|%s--:|\n", bkDashes)
 		} else {
-			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | mult | rawSec | hdfSec |\n")
-			b.WriteString("|---|---|---|---|--:|--:|--:|--:|--:|\n")
+			fmt.Fprintf(&b, "| question | type | raw | hdf | rawTok | hdfTok | mult | rawSec | hdfSec |%s\n", bkCols)
+			fmt.Fprintf(&b, "|---|---|---|---|--:|--:|--:|--:|--:|%s\n", bkDashes)
 		}
 		for _, r := range run.Results {
 			row := fmt.Sprintf("| %s | %s | %s | %s | %d | %d | %s | %.1f | %.1f |",
 				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
 				ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 				r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
+			if len(bks) > 0 {
+				vc, vo := questionBookendRatios(r, bkByID)
+				row += fmt.Sprintf(" %s | %s |", vc, vo)
+			}
 			if adHoc {
 				ah := 0
 				if r.HDFAdHoc != nil {
@@ -362,15 +436,24 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 		if adHoc {
 			fmt.Fprintf(&b, "- hdf-mcp arm (ad-hoc convert): **%.1f** (%s vs raw)\n", adhocSec, ratioF(adhocSec, rawSec))
 		}
+		if c, ok := checkBookends(run.Results, bks); ok {
+			b.WriteString("\n**Bookend check** (real arm spend vs the model-free bookends)\n\n")
+			fmt.Fprintf(&b, "- raw arm: **%d** = %.1f%% of the whole-file ceiling (%d)\n",
+				c.RawSpent, 100*ratioFloat(c.RawSpent, c.RawCeiling), c.RawCeiling)
+			if c.Reachable > 0 {
+				fmt.Fprintf(&b, "- hdf arm: **%d** = %s the hand-optimal oracle (%d; over %d reachable questions)\n",
+					c.HDFSpent, ratio(c.HDFSpent, c.OracleTotal), c.OracleTotal, c.Reachable)
+			}
+		}
 		b.WriteString("\n")
 	}
-	b.WriteString(markdownFooter(adHoc))
+	b.WriteString(markdownFooter(adHoc, len(bks) > 0))
 	return b.String()
 }
 
 // markdownFooter renders the text footer's limitations note as a markdown blockquote.
-func markdownFooter(adHoc bool) string {
-	text := strings.TrimSpace(footer(adHoc))
+func markdownFooter(adHoc, bookends bool) string {
+	text := strings.TrimSpace(footer(adHoc, bookends))
 	var b strings.Builder
 	b.WriteString("---\n\n> **Notes / limitations** (read before trusting a number)\n>\n")
 	for _, line := range strings.Split(text, "\n") {

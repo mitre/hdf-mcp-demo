@@ -31,6 +31,16 @@ type Source struct {
 	CLIPrep []string
 }
 
+// OracleCall is one hand-written, ideal-play MCP tool invocation — the bookend
+// the ceiling analysis assumes. It is executed model-free; its response tokens
+// are the hdfOracle bookend, and the gated oracle test pins its response against
+// the question's computed ground truth so an "optimal call" that does not
+// actually answer the question cannot ship.
+type OracleCall struct {
+	Tool string
+	Args map[string]any
+}
+
 type Question struct {
 	ID      string
 	Ask     string   // natural-language question; the harness appends the file names per arm
@@ -38,6 +48,11 @@ type Question struct {
 	Kind    Kind
 	Intent  IntentView // Class B only
 	Truth   truth.Question
+	// Exactly one of Oracle / OracleUnreachable is set: either the ideal-play
+	// call(s) for the bounded surface, or the reason no bounded call can answer
+	// (which is itself a reported finding, not an excuse).
+	Oracle            []OracleCall
+	OracleUnreachable string
 }
 
 // Primary is the question's first source — the one an ad-hoc (convert-on-demand)
@@ -91,13 +106,15 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
 			Truth:   gosecTruth,
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "gosec.hdf.json"}, "limit": 1}}},
 		},
 		{
 			ID:   "gosec-total-findings",
 			Ask:  "How many total findings did the gosec SAST scanner emit (the raw count of individual finding entries, before any de-duplication)?",
 			Kind: KindCount, Intent: IntentRaw,
-			Sources: []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
-			Truth:   gosecTruth,
+			Sources:           []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
+			Truth:             gosecTruth,
+			OracleUnreachable: "result-level finding volume; the read surface projects requirement counts only",
 		},
 		{
 			ID:   "grype-match-count",
@@ -105,6 +122,7 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF, // A: both views agree, intent is moot
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeMatchCount), HDF: truth.Primary(truth.HDFRequirementCount)},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "limit": 1}}},
 		},
 		{
 			ID:   "grype-cve-present",
@@ -112,6 +130,9 @@ func Bank() []Question {
 			Kind: KindBool, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeCVEPresent("CVE-2021-36159")), HDF: truth.Primary(truth.HDFRequirementPresent("CVE-2021-36159"))},
+			// search, not id: converters namespace requirement IDs (Grype/CVE-…),
+			// and searching the bare CVE is how a real ideal caller would ask.
+			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "search": "CVE-2021-36159", "limit": 1}}},
 		},
 		{
 			ID:   "grype-compliance-rate",
@@ -119,6 +140,7 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.Primary(truth.HDFComplianceRate)},
+			Oracle:  []OracleCall{{Tool: "hdf_compliance", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}}}},
 		},
 		{
 			ID:   "grype-has-critical",
@@ -126,6 +148,7 @@ func Bank() []Question {
 			Kind: KindBool, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeSeverityPresent("Critical")), HDF: truth.Primary(truth.HDFImpactPresentAtLeast(0.9))},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "impact": ">=0.9", "limit": 1}}},
 		},
 		// Category 5: the case where the HDF arm is expected to LOSE. grype records
 		// relatedVulnerabilities; conversion preserves it verbatim in the
@@ -136,8 +159,9 @@ func Bank() []Question {
 			ID:   "grype-related-vulns",
 			Ask:  "How many vulnerability matches in the grype scan list at least one related vulnerability?",
 			Kind: KindCount, Intent: IntentHDF,
-			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
-			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeRelatedVulnCount), HDF: truth.Primary(truth.HDFRelatedVulnCountFromCode)},
+			Sources:           []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
+			Truth:             truth.Question{Raw: truth.Primary(truth.GrypeRelatedVulnCount), HDF: truth.Primary(truth.HDFRelatedVulnCountFromCode)},
+			OracleUnreachable: "preserved verbatim in the requirement's code field, which no read tool projects",
 		},
 		{
 			ID:   "zap-alert-count",
@@ -145,6 +169,7 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF, // A: ZAP does not dedup, so raw==HDF
 			Sources: []Source{{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.ZapAlertCount), HDF: truth.Primary(truth.HDFRequirementCount)},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "limit": 1}}},
 		},
 		// The InSpec pair is the large-document case (1.2MB raw). Everything else in
 		// the bank is a small-to-medium scan, where a bounded tool response has
@@ -157,6 +182,7 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF, // A: InSpec is rule-shaped already, so raw==HDF
 			Sources: []Source{{Fixture: "inspec.json", From: "hdf", HDFName: "inspec.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.InspecControlCount), HDF: truth.Primary(truth.HDFRequirementCount)},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "inspec.hdf.json"}, "limit": 1}}},
 		},
 		{
 			ID:   "inspec-compliance-rate",
@@ -164,6 +190,7 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF, // A: a compliance run states pass/fail natively
 			Sources: []Source{{Fixture: "inspec.json", From: "hdf", HDFName: "inspec.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.InspecComplianceRate), HDF: truth.Primary(truth.HDFComplianceRate)},
+			Oracle:  []OracleCall{{Tool: "hdf_compliance", Args: map[string]any{"source": map[string]any{"path": "inspec.hdf.json"}}}},
 		},
 		{
 			ID:   "zap-high-severity-count",
@@ -171,6 +198,7 @@ func Bank() []Question {
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.ZapHighCount), HDF: truth.Primary(truth.HDFImpactCountAtLeast(0.7))},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "impact": ">=0.7", "limit": 1}}},
 		},
 	}
 }
