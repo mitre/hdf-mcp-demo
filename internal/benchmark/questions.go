@@ -200,6 +200,30 @@ func Bank() []Question {
 			Truth:   truth.Question{Raw: truth.Primary(truth.ZapHighCount), HDF: truth.Primary(truth.HDFImpactCountAtLeast(0.7))},
 			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "impact": ">=0.7", "limit": 1}}},
 		},
+		// The cross-format aggregate is HDF's core use case (the Heimdall workflow):
+		// one question over three UNLIKE severity vocabularies — gosec's
+		// LOW/MEDIUM/HIGH, ZAP's numeric riskcodes, grype's Critical..Unknown. The
+		// raw arm must discover and reconcile all three itself; the HDF arm filters
+		// one normalized impact scale three times. Both views agree on the real
+		// fixtures (0 + 3 + 57 = 60), so the vocabulary mapping itself is what is
+		// being trusted — and the truth pins fail loudly if a converter ever breaks
+		// band alignment.
+		{
+			ID:   "cross-format-high-count",
+			Ask:  "Across the gosec (SAST), ZAP (DAST), and grype (vulnerability) scans together, how many findings are high severity or above?",
+			Kind: KindCount, Intent: IntentHDF,
+			Sources: []Source{
+				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
+				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
+				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
+			},
+			Truth: truth.Question{Raw: truth.CrossFormatHighSeverityCount, HDF: truth.HDFImpactTotalAtLeast(0.7)},
+			Oracle: []OracleCall{
+				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "gosec.hdf.json"}, "impact": ">=0.7", "limit": 1}},
+				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "impact": ">=0.7", "limit": 1}},
+				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "impact": ">=0.7", "limit": 1}},
+			},
+		},
 	}
 }
 

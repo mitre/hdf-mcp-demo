@@ -120,6 +120,7 @@ func TestBenchmark_Pipeline(t *testing.T) {
 		"inspec-control-count":    truth.ClassA, // 192 == 192 (InSpec is already rule-shaped)
 		"inspec-compliance-rate":  truth.ClassA, // 80% == 80% (pass/fail is native to a compliance run)
 		"grype-related-vulns":     truth.ClassA, // 45 == 45: conversion keeps the field in code; only the READ SURFACE lacks it
+		"cross-format-high-count": truth.ClassA, // 0+3+57 == 60 across three severity vocabularies — the mapping is band-aligned
 	}
 	for _, r := range results {
 		if want[r.ID] != r.Class {

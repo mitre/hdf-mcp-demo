@@ -201,25 +201,36 @@ func TestOracles_MatchGroundTruth(t *testing.T) {
 				t.Fatalf("reachable oracle on a question whose hdf key is unanswerable — mark it unreachable instead")
 			}
 
-			r, err := ReadOracle(bk.Responses[len(bk.Responses)-1])
-			if err != nil {
-				t.Fatal(err)
+			// A multi-call oracle (the cross-format aggregate) answers with the SUM
+			// of its per-document totals; a rate oracle answers with compliance.
+			var totalSum int
+			var compliance float64
+			var hasCompliance bool
+			for _, resp := range bk.Responses {
+				r, err := ReadOracle(resp)
+				if err != nil {
+					t.Fatal(err)
+				}
+				totalSum += r.Total
+				if r.HasCompliance {
+					compliance, hasCompliance = r.Compliance, true
+				}
 			}
 			switch {
-			case r.HasCompliance:
+			case hasCompliance:
 				want, err := strconv.Atoi(key.Value)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if math.Abs(r.Compliance-float64(want)) > 1.0 {
-					t.Errorf("oracle compliance %.2f vs ground truth %d — the ideal call does not answer the question", r.Compliance, want)
+				if math.Abs(compliance-float64(want)) > 1.0 {
+					t.Errorf("oracle compliance %.2f vs ground truth %d — the ideal call does not answer the question", compliance, want)
 				}
 			case q.Kind == KindBool:
-				if got := strconv.FormatBool(r.Total > 0); got != key.Value {
+				if got := strconv.FormatBool(totalSum > 0); got != key.Value {
 					t.Errorf("oracle presence %v vs ground truth %s", got, key.Value)
 				}
 			default:
-				if got := strconv.Itoa(r.Total); got != key.Value {
+				if got := strconv.Itoa(totalSum); got != key.Value {
 					t.Errorf("oracle total %s vs ground truth %s — the ideal call does not answer the question", got, key.Value)
 				}
 			}

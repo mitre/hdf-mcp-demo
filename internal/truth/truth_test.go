@@ -191,6 +191,46 @@ func TestInspecTruth(t *testing.T) {
 	}
 }
 
+// TestCrossFormatTruth pins the cross-format aggregate — HDF's core Heimdall use
+// case: three UNLIKE severity vocabularies (gosec HIGH/MEDIUM/LOW, ZAP numeric
+// riskcodes, grype Critical..Unknown) asked one question. The raw view must sum
+// per-format high-or-above counts over the real fixtures: gosec 0 (all MEDIUM) +
+// zap 3 (riskcode 3) + grype 57 (13 Critical + 44 High) = 60.
+func TestCrossFormatTruth(t *testing.T) {
+	docs := make([][]byte, 0, 3)
+	for _, f := range []string{"gosec.json", "zap.json", "grype.json"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "fixtures", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, b)
+	}
+	got, err := CrossFormatHighSeverityCount(docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Answerable || got.Value != "60" {
+		t.Errorf("raw cross-format high-or-above = %+v, want 60", got)
+	}
+	if _, err := CrossFormatHighSeverityCount(docs[:2]); err == nil {
+		t.Error("want error when a source document is missing")
+	}
+}
+
+// TestHDFImpactTotalAtLeast exercises the multi-document HDF view: the sum of
+// impact>=min counts across several converted documents.
+func TestHDFImpactTotalAtLeast(t *testing.T) {
+	docA := []byte(`{"baselines":[{"requirements":[{"id":"a","impact":0.9},{"id":"b","impact":0.5}]}]}`)
+	docB := []byte(`{"baselines":[{"requirements":[{"id":"c","impact":0.7}]}]}`)
+	got, err := HDFImpactTotalAtLeast(0.7)([][]byte{docA, docB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "2" {
+		t.Errorf("HDFImpactTotalAtLeast(0.7) = %+v, want 2", got)
+	}
+}
+
 // TestGrypeRelatedVulns pins the category-5 pair. The two views must AGREE (45):
 // conversion keeps the field, so this is Class A and the HDF arm is graded on it
 // rather than excused. If a converter change ever did drop the field, this test

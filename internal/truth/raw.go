@@ -232,6 +232,66 @@ func InspecComplianceRate(b []byte) (Answer, error) {
 	return Answered(strconv.Itoa(passed * 100 / total)), nil
 }
 
+// gosecHighCount is the number of gosec findings at severity HIGH — gosec's top
+// band (its scale is LOW/MEDIUM/HIGH), so this is its "high or above" count.
+func gosecHighCount(b []byte) (int, error) {
+	g, err := parseGosec(b)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, i := range g.Issues {
+		if i.Severity == "HIGH" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// grypeHighPlusCount is the number of grype matches at High or Critical.
+func grypeHighPlusCount(b []byte) (int, error) {
+	g, err := parseGrype(b)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, m := range g.Matches {
+		if s := m.Vulnerability.Severity; s == "High" || s == "Critical" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// CrossFormatHighSeverityCount is the raw view of the cross-format aggregate:
+// the total high-or-above findings across three UNLIKE severity vocabularies —
+// gosec (HIGH on a LOW/MEDIUM/HIGH scale), ZAP (riskcode 3 on 0–3), and grype
+// (High/Critical on Critical..Unknown). The raw arm must reconcile all three
+// vocabularies itself; the sources arrive in declaration order (gosec, zap,
+// grype). This is the normalization-as-join-point case HDF exists for.
+func CrossFormatHighSeverityCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 3 {
+		return Answer{}, fmt.Errorf("cross-format count needs gosec, zap, grype documents; got %d", len(docs))
+	}
+	gosecN, err := gosecHighCount(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	zapA, err := ZapHighCount(docs[1])
+	if err != nil {
+		return Answer{}, err
+	}
+	zapN, err := strconv.Atoi(zapA.Value)
+	if err != nil {
+		return Answer{}, err
+	}
+	grypeN, err := grypeHighPlusCount(docs[2])
+	if err != nil {
+		return Answer{}, err
+	}
+	return Answered(strconv.Itoa(gosecN + zapN + grypeN)), nil
+}
+
 // GrypeRelatedVulnCount counts matches carrying at least one related
 // vulnerability. This is a tool-specific field: grype records it, and while HDF
 // conversion preserves it verbatim inside the requirement's `code` payload, no

@@ -119,9 +119,9 @@ export HDF_BIN="$PWD/../hdf-libs/hdf-cli/hdf"
 
 Results land in `results/` as markdown. `cmd/benchmark` is also usable directly (`go run ./cmd/benchmark -provider ollama -models gpt-oss:20b`), and speaks to any OpenAI-compatible gateway with `-provider openai`.
 
-### The eleven questions
+### The twelve questions
 
-One constraint shapes the whole bank: every question's ground truth must be **computable from the data by code** — once over the raw scanner output, once over the converted HDF document — never asserted by hand and never judged by an LLM. That limits the bank to question shapes with closed-form answers (counts, existence, thresholds, rates), which is also why there are eleven questions and not fifty. Where the two computed answers agree, the question is *objective*; where they legitimately differ, it is *interpretive* and graded to its stated intent; where only one view can express an answer at all, it is *hdf-only*. The classification is recomputed from the data at run time, so a converter change that altered the semantics would reclassify the question rather than silently grade against a stale key.
+One constraint shapes the whole bank: every question's ground truth must be **computable from the data by code** — once over the raw scanner output, once over the converted HDF document — never asserted by hand and never judged by an LLM. That limits the bank to question shapes with closed-form answers (counts, existence, thresholds, rates), which is also why there are twelve questions and not fifty. Where the two computed answers agree, the question is *objective*; where they legitimately differ, it is *interpretive* and graded to its stated intent; where only one view can express an answer at all, it is *hdf-only*. The classification is recomputed from the data at run time, so a converter change that altered the semantics would reclassify the question rather than silently grade against a stale key.
 
 | Question | Asks | Type | Why it is in the bank |
 |---|---|---|---|
@@ -133,6 +133,7 @@ One constraint shapes the whole bank: every question's ground truth must be **co
 | `grype-compliance-rate` | what percentage of the scan is passing? | hdf-only | A vuln scanner has no native pass rate; HDF's normalization adds one. The raw arm is out of remit — measured on whether it honestly declines or invents a rate. |
 | `grype-related-vulns` | matches listing at least one related vulnerability (45) | objective — **expected HDF loss** | Category 5, the honest counter-example. Conversion preserves the field byte-for-byte inside the requirement's `code`, but no HDF read tool projects `code` — so the HDF arm must get there through a bounded surface that doesn't expose the answer. Graded, not excused. |
 | `zap-alert-count` | alerts in the ZAP scan | objective | A second no-dedup scanner from a different tool family (DAST), so the answer-preserving case isn't a single-scanner artifact. |
+| `cross-format-high-count` | high-severity-or-above findings across the gosec + ZAP + grype scans together | objective (60) | The Heimdall workflow: one question over three *unlike* severity vocabularies (gosec HIGH/MEDIUM/LOW, ZAP numeric riskcodes, grype Critical…Unknown). The raw arm must discover and reconcile all three itself; the HDF arm filters one normalized impact scale. The only multi-source question in the bank. |
 | `zap-high-severity-count` | high-risk alerts in the ZAP scan | objective | Count-above-threshold over ZAP's numeric riskcodes vs. HDF impact ≥ 0.7 — vocabulary mapping on a *count*, stricter than mere existence. |
 | `inspec-control-count` | controls in the InSpec compliance run | objective (192) | The large-document regime: a 1.2 MB compliance run. Everything else is small enough that grep competes; this is the scale bounded tool responses are actually for. |
 | `inspec-compliance-rate` | percentage of InSpec results passing | objective (80%) | The rate question where the raw arm **can** answer — a compliance run states pass/fail natively — making it the fair counterpart to the hdf-only grype rate. |
@@ -142,6 +143,7 @@ Why this particular selection, compressed:
 - **Every grading class is occupied, and interpretive runs both directions.** The gosec pair grades the identical 7-vs-3 divergence once in HDF's favor and once in raw's, so the taxonomy can't be gamed by question wording.
 - **The expected loss is in the bank and graded.** `grype-related-vulns` exists so the study measures where HDF's bounded read surface hurts, instead of only sampling questions the tools are good at.
 - **Four tool families, two output shapes.** SAST (gosec, dedups), vuln scan (grype, doesn't), DAST (ZAP, doesn't), compliance (InSpec, already rule-shaped) — so "normalization changes the answer" appears exactly where the scanner's shape predicts it, and nowhere else.
+- **The core use case is asked directly.** `cross-format-high-count` spans three unlike formats in one question — normalization as the join point for holistic analysis, which is what HDF is for. Both views agree on the fixtures (60), so what the question really tests is whether an agent can *use* that alignment.
 - **Three size regimes.** Small (gosec, ZAP), medium (grype, ~155k tokens raw), large (InSpec, 1.2 MB) — the raw arm's viability degrades with size, and the bank has to cover the whole ramp for that to show up in the accuracy table.
 
 What's deliberately *not* here: prose questions ("summarize the risk posture") that would need an LLM judge, and a genuine raw-only question (a field HDF *drops*), because these converters are near-lossless — the closest real case is `grype-related-vulns`, where the field survives conversion but not the read surface.
@@ -164,8 +166,8 @@ Leave headroom: the context window costs memory on top of the weights, and each 
 ### What to expect
 
 - **Small models mostly fail, and that is a real result rather than a broken harness.** `llama3.2:3b` scores near zero on *both* arms here — it cannot hold a multi-step tool loop together long enough to answer. The tool loop, not the security data, is the binding constraint at that size. Expect useful signal from roughly 8B upward.
-- **Local inference is slow.** A 30B model can take ~30 minutes for the eleven questions; the whole ladder is an afternoon. The InSpec pair reads a 1.2MB document, so the raw arm works hardest there. Timeouts scale automatically with the model count, and a model that stalls is skipped rather than taking the run down with it.
-- **N is small and one run is noisy.** Eleven questions at `-repeat 1` is directional at best. Use `-repeat 3` before believing any single number.
+- **Local inference is slow.** A 30B model can take ~30 minutes for the twelve questions; the whole ladder is an afternoon. The InSpec pair reads a 1.2MB document, so the raw arm works hardest there. Timeouts scale automatically with the model count, and a model that stalls is skipped rather than taking the run down with it.
+- **N is small and one run is noisy.** Twelve questions at `-repeat 1` is directional at best. Use `-repeat 3` before believing any single number.
 - **Cheap wrong answers are not a cost win.** If an arm fails or gives up early, it also spends few tokens. Read the accuracy table and the cost table together — a token ratio from a run where one arm never really engaged means nothing.
 
 ### Useful flags

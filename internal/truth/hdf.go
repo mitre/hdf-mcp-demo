@@ -110,6 +110,32 @@ func HDFImpactCountAtLeast(threshold float64) func([]byte) (Answer, error) {
 	}
 }
 
+// HDFImpactTotalAtLeast is the multi-document HDF view of a cross-format
+// aggregate: the impact>=threshold count summed over every converted document.
+// After normalization one impact scale spans all source vocabularies, so the
+// sum is a single filter repeated — the whole point of the join-point design.
+func HDFImpactTotalAtLeast(threshold float64) func([][]byte) (Answer, error) {
+	single := HDFImpactCountAtLeast(threshold)
+	return func(docs [][]byte) (Answer, error) {
+		if len(docs) == 0 {
+			return Answer{}, fmt.Errorf("no documents supplied")
+		}
+		total := 0
+		for _, d := range docs {
+			a, err := single(d)
+			if err != nil {
+				return Answer{}, err
+			}
+			n, err := strconv.Atoi(a.Value)
+			if err != nil {
+				return Answer{}, err
+			}
+			total += n
+		}
+		return Answered(strconv.Itoa(total)), nil
+	}
+}
+
 // HDFImpactPresentAtLeast reports whether any requirement's impact is at least
 // threshold (e.g. a Critical finding maps to impact 0.9).
 func HDFImpactPresentAtLeast(threshold float64) func([]byte) (Answer, error) {
