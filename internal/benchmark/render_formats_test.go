@@ -217,6 +217,48 @@ func TestWallClockReported(t *testing.T) {
 	}
 }
 
+// TestPerQuestionMultiplier pins the per-question mult column: the aggregate
+// "Nx vs raw" line hides which questions are the peaks and valleys, so each
+// detail row carries its own hdfTok/rawTok multiplier in every format. Sample
+// arms cost raw 110 / hdf 212 → 1.93x; a zero-raw row must render n/a, not Inf.
+func TestPerQuestionMultiplier(t *testing.T) {
+	runs := sampleRuns()
+	if got := Render(runs[0].Model, runs[0].Results, false); !strings.Contains(got, "1.93x") {
+		t.Errorf("text report missing per-question mult:\n%s", got)
+	}
+	md := RenderMarkdown(RunMeta{Models: []string{"stub"}}, runs, false)
+	if !strings.Contains(md, "| mult |") || !strings.Contains(md, "| 1.93x |") {
+		t.Errorf("markdown report missing per-question mult:\n%s", md)
+	}
+	js, err := RenderJSON(RunMeta{Models: []string{"stub"}}, runs, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Runs []struct {
+			Questions []struct {
+				HDFVsRaw float64 `json:"hdfVsRaw"`
+			} `json:"questions"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(js), &got); err != nil {
+		t.Fatal(err)
+	}
+	if r := got.Runs[0].Questions[0].HDFVsRaw; r < 1.92 || r > 1.94 {
+		t.Errorf("json hdfVsRaw = %v, want ~1.93", r)
+	}
+
+	// Zero-raw (failed-before-usage) row: n/a, never Inf/NaN.
+	zero := []ModelRun{{Model: "z", Results: []QuestionResult{{
+		ID: "q", Class: truth.ClassA, RawView: truth.Answered("1"), HDFView: truth.Answered("1"),
+		Raw: ArmResult{Arm: ArmRaw, Verdict: Failed, Scored: true, Samples: 1},
+		HDF: ArmResult{Arm: ArmHDF, Verdict: Failed, Scored: true, Samples: 1},
+	}}}}
+	if got := RenderMarkdown(RunMeta{Models: []string{"z"}}, zero, false); !strings.Contains(got, "| n/a |") {
+		t.Errorf("zero-raw row should render n/a:\n%s", got)
+	}
+}
+
 // TestFailureReasonsSurfaced pins the diagnosability fix: an all-failed run must
 // say WHY each arm failed — the transport error vs. the max-iters timeout — not
 // just print "failed". Without this a run where the endpoint was down and a run

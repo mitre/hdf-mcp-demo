@@ -128,6 +128,7 @@ type jsonQuestion struct {
 	Raw      jsonArm    `json:"raw"`
 	HDF      jsonArm    `json:"hdf"`
 	HDFAdHoc *jsonArm   `json:"hdfAdHoc,omitempty"`
+	HDFVsRaw float64    `json:"hdfVsRaw"` // per-question hdf/raw token multiplier (0 when raw is 0)
 }
 
 type jsonAccuracy struct {
@@ -217,6 +218,7 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool) (string, error) {
 				ID: r.ID, Ask: r.Ask, Type: typeLabel(r.Class),
 				RawView: toJSONAnswer(r.RawView), HDFView: toJSONAnswer(r.HDFView),
 				Raw: toJSONArm(r.Raw), HDF: toJSONArm(r.HDF),
+				HDFVsRaw: ratioFloat(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 			}
 			if r.HDFAdHoc != nil {
 				a := toJSONArm(*r.HDFAdHoc)
@@ -287,15 +289,16 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool) string {
 		fmt.Fprintf(&b, "## %s (%d questions)\n\n", run.Model, len(run.Results))
 
 		if adHoc {
-			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | rawSec | hdfSec | adhocTok |\n")
-			b.WriteString("|---|---|---|---|--:|--:|--:|--:|--:|\n")
+			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | mult | rawSec | hdfSec | adhocTok |\n")
+			b.WriteString("|---|---|---|---|--:|--:|--:|--:|--:|--:|\n")
 		} else {
-			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | rawSec | hdfSec |\n")
-			b.WriteString("|---|---|---|---|--:|--:|--:|--:|\n")
+			b.WriteString("| question | type | raw | hdf | rawTok | hdfTok | mult | rawSec | hdfSec |\n")
+			b.WriteString("|---|---|---|---|--:|--:|--:|--:|--:|\n")
 		}
 		for _, r := range run.Results {
-			row := fmt.Sprintf("| %s | %s | %s | %s | %d | %d | %.1f | %.1f |",
+			row := fmt.Sprintf("| %s | %s | %s | %s | %d | %d | %s | %.1f | %.1f |",
 				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
+				ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 				r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 			if adHoc {
 				ah := 0

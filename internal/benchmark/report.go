@@ -15,16 +15,18 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "model: %s   (%d questions)\n\n", model, len(results))
 
-	// Per-question detail.
-	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "rawSec", "hdfSec")
+	// Per-question detail. mult is that question's hdfTok/rawTok — the aggregate
+	// cost ratio hides which questions are the peaks and valleys.
+	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s %7s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "mult", "rawSec", "hdfSec")
 	if adHoc {
 		hdr += fmt.Sprintf(" %8s", "adhocTok")
 	}
 	b.WriteString(hdr + "\n" + strings.Repeat("-", len(hdr)) + "\n")
 	for _, r := range results {
-		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d %7.1f %7.1f",
+		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d %7s %7.1f %7.1f",
 			trunc(r.ID, 22), typeLabel(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
 			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
+			ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 			r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 		if adHoc {
 			ah := 0
