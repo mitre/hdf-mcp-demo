@@ -20,6 +20,7 @@ type hdfDoc struct {
 type hdfRequirement struct {
 	ID      string  `json:"id"`
 	Impact  float64 `json:"impact"`
+	Code    string  `json:"code"` // verbatim source finding (converter passthrough)
 	Results []struct {
 		Status string `json:"status"`
 	} `json:"results"`
@@ -108,6 +109,107 @@ func HDFImpactCountAtLeast(threshold float64) func([]byte) (Answer, error) {
 		}
 		return Answered(strconv.Itoa(n)), nil
 	}
+}
+
+// HDFDistinctFixedCount is the HDF view of the temporal diff: distinct
+// requirement IDs present in the previous document (first) but not the current
+// (second). Grype-converted requirement IDs are the namespaced vulnerability IDs
+// (one requirement per match), so deduplication mirrors the raw view's
+// distinct-ID semantics.
+func HDFDistinctFixedCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 2 {
+		return Answer{}, fmt.Errorf("temporal diff needs the previous and current documents; got %d", len(docs))
+	}
+	sets := make([]map[string]bool, 2)
+	for i, doc := range docs {
+		d, err := parseHDF(doc)
+		if err != nil {
+			return Answer{}, err
+		}
+		ids := map[string]bool{}
+		for _, r := range hdfRequirements(d) {
+			ids[r.ID] = true
+		}
+		sets[i] = ids
+	}
+	fixed := 0
+	for id := range sets[0] {
+		if !sets[1][id] {
+			fixed++
+		}
+	}
+	return Answered(strconv.Itoa(fixed)), nil
+}
+
+// hdfSystem is the subset of an HDF System document the join reads: components
+// and their BOM entries. A BOM may embed the source document or merely reference
+// it (ref) — only an embedded document carries the package inventory.
+type hdfSystem struct {
+	Components []struct {
+		Boms []struct {
+			Document json.RawMessage `json:"document"`
+		} `json:"boms"`
+	} `json:"components"`
+}
+
+// HDFVulnFreePackageCount is the HDF view of the SBOM×vuln join, over the grype
+// results document (first) and the system document (second). It answers ONLY if
+// the system document embeds the SBOM's package inventory; the current SPDX
+// import carries the BOM as a reference (boms[].ref) with no embedded document,
+// so the join key is simply absent from the HDF view and the answer is
+// unanswerable — a genuine raw-only (Class D) fact. If a future converter embeds
+// the document, this starts answering and the question auto-reclassifies.
+func HDFVulnFreePackageCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 2 {
+		return Answer{}, fmt.Errorf("sbom join needs the results and system documents; got %d", len(docs))
+	}
+	var sys hdfSystem
+	if err := json.Unmarshal(docs[1], &sys); err != nil {
+		return Answer{}, fmt.Errorf("parse hdf system: %w", err)
+	}
+	var packages rawSPDX
+	embedded := false
+	for _, c := range sys.Components {
+		for _, b := range c.Boms {
+			if len(b.Document) == 0 || string(b.Document) == "null" {
+				continue
+			}
+			if err := json.Unmarshal(b.Document, &packages); err != nil {
+				return Answer{}, fmt.Errorf("parse embedded bom document: %w", err)
+			}
+			embedded = true
+		}
+	}
+	if !embedded || len(packages.Packages) == 0 {
+		return Unanswerable(), nil
+	}
+
+	d, err := parseHDF(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	vulnerable := map[string]bool{}
+	for _, r := range hdfRequirements(d) {
+		if r.Code == "" {
+			continue
+		}
+		var m struct {
+			Artifact struct {
+				Name string `json:"name"`
+			} `json:"artifact"`
+		}
+		if err := json.Unmarshal([]byte(r.Code), &m); err != nil {
+			return Answer{}, fmt.Errorf("parse requirement code: %w", err)
+		}
+		vulnerable[m.Artifact.Name] = true
+	}
+	free := 0
+	for _, p := range packages.Packages {
+		if !vulnerable[p.Name] {
+			free++
+		}
+	}
+	return Answered(strconv.Itoa(free)), nil
 }
 
 // HDFImpactTotalAtLeast is the multi-document HDF view of a cross-format

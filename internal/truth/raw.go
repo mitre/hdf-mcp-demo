@@ -60,6 +60,9 @@ type rawGrype struct {
 			ID       string `json:"id"`
 			Severity string `json:"severity"`
 		} `json:"vulnerability"`
+		Artifact struct {
+			Name string `json:"name"`
+		} `json:"artifact"`
 	} `json:"matches"`
 }
 
@@ -290,6 +293,84 @@ func CrossFormatHighSeverityCount(docs [][]byte) (Answer, error) {
 		return Answer{}, err
 	}
 	return Answered(strconv.Itoa(gosecN + zapN + grypeN)), nil
+}
+
+// grypeDistinctIDs is the set of distinct vulnerability IDs in a grype scan —
+// grype emits one match per vulnerable package instance, so the same CVE can
+// appear several times.
+func grypeDistinctIDs(b []byte) (map[string]bool, error) {
+	g, err := parseGrype(b)
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]bool{}
+	for _, m := range g.Matches {
+		ids[m.Vulnerability.ID] = true
+	}
+	return ids, nil
+}
+
+// GrypeDistinctFixedCount is the raw view of the temporal diff: how many
+// distinct vulnerability IDs from the previous scan (first source) are gone in
+// the current scan (second source). Distinct-ID level is deliberate: a
+// match-instance diff reports churn for CVEs that persist across package
+// version bumps, which is noise for the "what got fixed" intent.
+func GrypeDistinctFixedCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 2 {
+		return Answer{}, fmt.Errorf("temporal diff needs the previous and current scans; got %d documents", len(docs))
+	}
+	prev, err := grypeDistinctIDs(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	curr, err := grypeDistinctIDs(docs[1])
+	if err != nil {
+		return Answer{}, err
+	}
+	fixed := 0
+	for id := range prev {
+		if !curr[id] {
+			fixed++
+		}
+	}
+	return Answered(strconv.Itoa(fixed)), nil
+}
+
+// rawSPDX is the subset of an SPDX SBOM the classifier reads: the package
+// inventory by name.
+type rawSPDX struct {
+	Packages []struct {
+		Name string `json:"name"`
+	} `json:"packages"`
+}
+
+// SBOMVulnFreePackageCount is the raw view of the SBOM×vuln join: how many
+// packages the SBOM inventories (second source) have NO match in the grype scan
+// of the same image (first source). Answering requires BOTH documents — the
+// vulnerable-package set alone cannot say how many packages exist in total.
+func SBOMVulnFreePackageCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 2 {
+		return Answer{}, fmt.Errorf("sbom join needs the vulnerability scan and the SBOM; got %d documents", len(docs))
+	}
+	g, err := parseGrype(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	vulnerable := map[string]bool{}
+	for _, m := range g.Matches {
+		vulnerable[m.Artifact.Name] = true
+	}
+	var s rawSPDX
+	if err := json.Unmarshal(docs[1], &s); err != nil {
+		return Answer{}, fmt.Errorf("parse spdx: %w", err)
+	}
+	free := 0
+	for _, p := range s.Packages {
+		if !vulnerable[p.Name] {
+			free++
+		}
+	}
+	return Answered(strconv.Itoa(free)), nil
 }
 
 // GrypeRelatedVulnCount counts matches carrying at least one related

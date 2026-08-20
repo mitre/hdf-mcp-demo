@@ -121,6 +121,8 @@ func TestBenchmark_Pipeline(t *testing.T) {
 		"inspec-compliance-rate":  truth.ClassA, // 80% == 80% (pass/fail is native to a compliance run)
 		"grype-related-vulns":     truth.ClassA, // 45 == 45: conversion keeps the field in code; only the READ SURFACE lacks it
 		"cross-format-high-count": truth.ClassA, // 0+3+57 == 60 across three severity vocabularies — the mapping is band-aligned
+		"grype-fixed-vulns":       truth.ClassA, // 5 == 5 distinct IDs fixed between the real alpine:3.11/3.12 pair
+		"sbom-vuln-free-packages": truth.ClassD, // the join key is carried as a BOM reference, not embedded — raw-only
 	}
 	for _, r := range results {
 		if want[r.ID] != r.Class {

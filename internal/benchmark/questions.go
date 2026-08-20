@@ -224,6 +224,42 @@ func Bank() []Question {
 				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "impact": ">=0.7", "limit": 1}},
 			},
 		},
+		// The temporal diff runs over a REAL pair: grype scans of alpine:3.11 and
+		// alpine:3.12 captured with one grype version and DB (see
+		// fixtures/PROVENANCE.md). Distinct-ID level is deliberate — grype emits one
+		// match per package instance, so an instance-level diff reports churn for
+		// CVEs that persist across version bumps.
+		{
+			ID: "grype-fixed-vulns",
+			Ask: "Two grype scans of the same container image are provided: the FIRST named file is the previous scan and the SECOND is the current scan. " +
+				"How many DISTINCT vulnerability IDs from the previous scan are no longer present in the current scan?",
+			Kind: KindCount, Intent: IntentHDF, // A: requirement IDs are the vulnerability IDs
+			Sources: []Source{
+				{Fixture: "grype-alpine311.json", From: "grype", HDFName: "grype-alpine311.hdf.json"},
+				{Fixture: "grype-alpine312.json", From: "grype", HDFName: "grype-alpine312.hdf.json"},
+			},
+			Truth:  truth.Question{Raw: truth.GrypeDistinctFixedCount, HDF: truth.HDFDistinctFixedCount},
+			Oracle: []OracleCall{{Tool: "hdf_diff", Args: map[string]any{"from": map[string]any{"path": "grype-alpine311.hdf.json"}, "to": map[string]any{"path": "grype-alpine312.hdf.json"}}}},
+		},
+		// The SBOM×vuln join is the bank's genuine Class D (raw-only): the syft
+		// SBOM covers the SAME image the grype scan does, but `hdf system create`
+		// carries the SBOM as a reference (boms[].ref) with no embedded inventory,
+		// so the HDF view does not contain the join key at all. The raw arm must
+		// actually join two files; the HDF arm is out of remit and is measured on
+		// hallucinate-vs-abstain.
+		{
+			ID: "sbom-vuln-free-packages",
+			Ask: "An SPDX SBOM inventories every package of the same container image the grype scan covers: the FIRST named file is the vulnerability scan and the SECOND is the SBOM. " +
+				"How many of the SBOM's packages have NO vulnerability matches in the grype scan?",
+			Kind: KindCount, Intent: IntentRaw, // D: only the raw view holds the join key
+			Sources: []Source{
+				{Fixture: "grype-alpine312.json", From: "grype", HDFName: "grype-alpine312.hdf.json"},
+				{Fixture: "spdx-alpine312.json", HDFName: "spdx-alpine312.system.hdf.json",
+					CLIPrep: []string{"system", "create", "{raw}", "--from", "spdx", "-o", "{hdf}"}},
+			},
+			Truth:             truth.Question{Raw: truth.SBOMVulnFreePackageCount, HDF: truth.HDFVulnFreePackageCount},
+			OracleUnreachable: "the join key (package inventory) is carried as a BOM reference, not embedded — no HDF document or read tool holds it",
+		},
 	}
 }
 

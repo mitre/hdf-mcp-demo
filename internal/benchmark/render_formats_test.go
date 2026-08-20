@@ -92,8 +92,9 @@ func TestRenderJSON(t *testing.T) {
 }
 
 // The raw-only (Class D) path is symmetric to hdf-only: the HDF arm is out of
-// remit. No live fixture yields a genuine Class D (these converters are near-
-// lossless), so exercise it synthetically.
+// remit. The bank's live occupant is sbom-vuln-free-packages (the SBOM inventory
+// is carried as a reference, not embedded); this exercises the same path
+// synthetically so the render logic is pinned without a conversion.
 func TestClassD_RawOnly(t *testing.T) {
 	q := Question{Intent: IntentHDF}
 	if k := q.key(truth.ClassD, truth.Answered("apk"), truth.Unanswerable(), ArmHDF); k.Answerable {

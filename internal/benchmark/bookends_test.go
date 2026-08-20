@@ -21,7 +21,11 @@ import (
 // lives in the unprojected `code` field. If a tool change ever makes one
 // answerable, this test forces the oracle to be written rather than left off.
 func TestBankOracles(t *testing.T) {
-	wantUnreachable := map[string]bool{"gosec-total-findings": true, "grype-related-vulns": true}
+	wantUnreachable := map[string]bool{
+		"gosec-total-findings":    true,
+		"grype-related-vulns":     true,
+		"sbom-vuln-free-packages": true, // the join key exists only in the raw files (Class D)
+	}
 	for _, q := range Bank() {
 		hasOracle := len(q.Oracle) > 0
 		hasReason := q.OracleUnreachable != ""
@@ -199,6 +203,43 @@ func TestOracles_MatchGroundTruth(t *testing.T) {
 			key := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmHDF)
 			if !key.Answerable {
 				t.Fatalf("reachable oracle on a question whose hdf key is unanswerable — mark it unreachable instead")
+			}
+
+			// The diff oracle answers at the distinct-ID level: IDs with an absent
+			// row and no new row are fixed. (The summary's counts are requirement-
+			// instance-level and report churn for CVEs that persist across package
+			// version bumps, so they are NOT the answer.)
+			if q.ID == "grype-fixed-vulns" {
+				absent, added := map[string]bool{}, map[string]bool{}
+				for _, resp := range bk.Responses {
+					var v struct {
+						Changes []struct {
+							ID    string `json:"id"`
+							State string `json:"state"`
+						} `json:"changes"`
+					}
+					if err := json.Unmarshal([]byte(resp), &v); err != nil {
+						t.Fatalf("parse diff payload: %v", err)
+					}
+					for _, c := range v.Changes {
+						switch c.State {
+						case "absent":
+							absent[c.ID] = true
+						case "new":
+							added[c.ID] = true
+						}
+					}
+				}
+				fixed := 0
+				for id := range absent {
+					if !added[id] {
+						fixed++
+					}
+				}
+				if got := strconv.Itoa(fixed); got != key.Value {
+					t.Errorf("oracle distinct-fixed %s vs ground truth %s — the diff response does not answer the question", got, key.Value)
+				}
+				return
 			}
 
 			// A multi-call oracle (the cross-format aggregate) answers with the SUM
