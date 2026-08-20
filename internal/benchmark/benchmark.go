@@ -49,6 +49,10 @@ type Options struct {
 	AdHoc       bool   // also measure the conversion-included HDF cost view
 	Concurrency int    // max questions in flight at once (default 1 = serial)
 	Repeat      int    // runs per arm (default 1); >1 yields accuracy rates and cost variance
+	// TranscriptDir, when set, writes one JSON transcript per (question, arm,
+	// sample) under <dir>/<model>/ — the full conversation, tool definitions, and
+	// graded outcome — so a failing or abstaining arm is diagnosable from evidence.
+	TranscriptDir string
 	// Progress, if set, is called once per question as it completes (serialized, so
 	// the callback need not be thread-safe) — for liveness during a long run.
 	Progress func(model, questionID string, done, total int)
@@ -199,10 +203,10 @@ func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB a
 	qr := QuestionResult{ID: q.ID, Ask: q.Ask, Class: cls.Class, RawView: cls.RawAnswer, HDFView: cls.HDFAnswer}
 	qr.Raw = runArm(ctx, inst, rawTB, ArmRaw, opts,
 		q.Ask+" "+fileClause("scan file", q.rawNames()),
-		q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw), q.Kind)
+		q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw), q.Kind, q.ID+".raw")
 	hdfKey := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmHDF)
 	qr.HDF = runArm(ctx, inst, mcpTB, ArmHDF, opts,
-		q.Ask+" "+fileClause("HDF document", q.hdfNames()), hdfKey, q.Kind)
+		q.Ask+" "+fileClause("HDF document", q.hdfNames()), hdfKey, q.Kind, q.ID+".hdf")
 
 	if adHocTB != nil {
 		// A per-question output name keeps concurrent ad-hoc conversions from
@@ -211,7 +215,7 @@ func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB a
 		p := q.Primary()
 		ah := runArm(ctx, inst, adHocTB, ArmHDF, opts,
 			fmt.Sprintf("%s The raw scan file is named %s. First convert it to HDF using hdf_convert with from=%s and output=%s, then analyze that HDF document.",
-				q.Ask, p.Fixture, p.From, out), hdfKey, q.Kind)
+				q.Ask, p.Fixture, p.From, out), hdfKey, q.Kind, q.ID+".adhoc")
 		qr.HDFAdHoc = &ah
 	}
 	return qr, nil
@@ -236,7 +240,8 @@ func fileClause(noun string, names []string) string {
 // and answer, the count graded Correct, answer agreement (consistency), mean cost,
 // and token stddev. An error (including a timeout) is a Failed sample with whatever
 // tokens were spent — never propagated, so one over-context arm can't sink the run.
-func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind) ArmResult {
+// label names the transcript files ("<questionID>.<raw|hdf|adhoc>").
+func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind, label string) ArmResult {
 	n := opts.repeat()
 	agg := ArmResult{Arm: arm, Scored: key.Answerable, Samples: n}
 	verdicts := map[Verdict]int{}
@@ -251,6 +256,11 @@ func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, a
 			v = Failed
 			if agg.Err == "" {
 				agg.Err = err.Error()
+			}
+		}
+		if opts.TranscriptDir != "" {
+			if werr := writeTranscript(opts.TranscriptDir, inst.Name(), label, i, arm, opts.system(), prompt, tb.Definitions(), res, v, err); werr != nil && agg.Err == "" {
+				agg.Err = "transcript: " + werr.Error()
 			}
 		}
 		verdicts[v]++

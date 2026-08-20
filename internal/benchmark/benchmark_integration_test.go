@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -96,8 +97,11 @@ func TestBenchmark_Pipeline(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	// Concurrency > 1 exercises the parallel path and the shared-session mutex.
-	results, err := Run(context.Background(), stubInstrument{}, sess, bin, "../../fixtures", root, Bank(), Options{MaxIters: 4, Concurrency: 3})
+	// Concurrency > 1 exercises the parallel path and the shared-session mutex;
+	// TranscriptDir exercises the diagnostic capture under concurrency.
+	trDir := t.TempDir()
+	results, err := Run(context.Background(), stubInstrument{}, sess, bin, "../../fixtures", root, Bank(),
+		Options{MaxIters: 4, Concurrency: 3, TranscriptDir: trDir})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -105,6 +109,15 @@ func TestBenchmark_Pipeline(t *testing.T) {
 
 	if len(results) != len(Bank()) {
 		t.Fatalf("got %d results, want %d", len(results), len(Bank()))
+	}
+
+	// One transcript per (question, arm): raw + hdf for every bank question.
+	trs, err := filepath.Glob(filepath.Join(trDir, "stub", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 2 * len(Bank()); len(trs) != want {
+		t.Errorf("transcripts written = %d, want %d", len(trs), want)
 	}
 
 	// Ground truth is computed from data — pin the headline classes.

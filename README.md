@@ -182,6 +182,7 @@ Leave headroom: the context window costs memory on top of the weights, and each 
 | `-concurrency` | Questions in flight per model (2 locally, 4 for a gateway). Raise only if you have memory to spare. |
 | `-format` | `text`, `json`, or `markdown` — for a saved, self-describing artifact. |
 | `-adhoc` | Also measure the conversion-included cost view, rather than assuming documents are already normalized. |
+| `-transcripts` | Write one JSON transcript per question/arm/sample (every prompt, tool definition, tool call, and the graded outcome) into this directory — the evidence trail for diagnosing an arm that fails or abstains. |
 
 ## Fixtures
 

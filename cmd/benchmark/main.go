@@ -53,6 +53,7 @@ func main() {
 	provider := flag.String("provider", "openai", "model provider: openai (OpenAI-compatible /v1 — LiteLLM, vLLM, Ollama's /v1 shim) | ollama (native /api/chat, fully local)")
 	numCtx := flag.Int("numctx", 32768, "ollama only: context window (num_ctx). Ollama's own default is 4096 whatever the model advertises, and it truncates silently — too small for the raw-file arm, so leaving it unset understates raw. 0 = defer to the server")
 	bookendsOnly := flag.Bool("bookends", false, "compute only the model-free token bookends (whole-file ceiling + hand-optimal oracle per question) and exit — needs no model, endpoint, or provider")
+	transcripts := flag.String("transcripts", "", "write one JSON transcript per (question, arm, sample) under this directory — every prompt, tool definition, tool call, and the graded outcome — for diagnosing a failing or abstaining arm from evidence")
 	flag.Parse()
 
 	cfg := runConfig{
@@ -60,7 +61,7 @@ func main() {
 		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
 		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
 		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider), numCtx: *numCtx,
-		bookendsOnly: *bookendsOnly,
+		bookendsOnly: *bookendsOnly, transcripts: *transcripts,
 	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = defaultConcurrency(cfg.provider)
@@ -87,6 +88,7 @@ type runConfig struct {
 	provider          string
 	numCtx            int
 	bookendsOnly      bool
+	transcripts       string
 }
 
 // endpoint resolves the provider's base URL. For ollama it is optional (the
@@ -290,6 +292,13 @@ func preflight(ctx context.Context, cfg runConfig, base string, models []string)
 	if fi, err := os.Stat(cfg.fixturesDir); err != nil || !fi.IsDir() {
 		return "", fmt.Errorf("fixtures directory %q not found (pass -fixtures)", cfg.fixturesDir)
 	}
+	// Create the transcript dir now, so an unwritable path fails in the first
+	// second rather than losing the first arm's evidence mid-run.
+	if cfg.transcripts != "" {
+		if err := os.MkdirAll(cfg.transcripts, 0o750); err != nil {
+			return "", fmt.Errorf("create -transcripts dir: %w", err)
+		}
+	}
 	bin, err := locateHDF()
 	if err != nil {
 		return "", err
@@ -329,7 +338,7 @@ func run(cfg runConfig) error {
 	defer cancel()
 
 	bank := benchmark.Bank()
-	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency, Repeat: cfg.repeat}
+	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency, Repeat: cfg.repeat, TranscriptDir: cfg.transcripts}
 	// Liveness: report each question as it finishes (to stderr, so stdout stays
 	// clean for -format json/markdown), so a long run visibly isn't hung.
 	opts.Progress = func(model, qID string, done, total int) {
