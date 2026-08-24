@@ -1,8 +1,9 @@
 // Command benchmark runs the graded, model-driven two-arm study (ADR-0002): each
 // vetted question is answered by the same model once over raw scan files and once
 // over the HDF MCP tools, graded against class-appropriate ground truth, and
-// reported per class with real token cost. Unlike `cmd/demo` (offline token
-// accounting), this drives a real model, so it needs an OpenAI-compatible endpoint.
+// reported per class with real token cost. The -bookends flag computes the
+// model-free token ceiling and oracle offline; everything else drives a real
+// model, so it needs a provider endpoint.
 //
 // Usage (run in your own shell so the token never enters an agent session):
 //

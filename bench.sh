@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the graded two-arm study against local models via Ollama — the
 # zero-cost path that needs no gateway, no API key, and no token leaving
-# your machine. See run.sh for the offline token-accounting demo.
+# your machine. For the model-free token bookends, run
+#   go run ./cmd/benchmark -bookends
 #
 #   ./bench.sh                      # every tool-capable model you have pulled
 #   ./bench.sh gpt-oss:20b          # just these models

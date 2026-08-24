@@ -1,7 +1,7 @@
 # ADR-0001: hdf-mcp-demo — a usage primer and efficiency demonstration for the HDF MCP server
 
 **Date:** 2026-08-16
-**Status:** proposed
+**Status:** proposed — *amended 2026-08-24, see [Amendments](#amendments)*
 **Deciders:** Will Dower
 
 ## Context
@@ -180,3 +180,31 @@ Ship the MCP with only the in-repo guide; leave the efficiency claim anecdotal.
 
 ### Relationship to hdf-libs tracking
 Tracked from the hdf-libs board under epic `uqhe`: `uqhe.1` (the signal probe — its method ports into Phase 2), `uqhe.2` (hdf-libs doc references to this repo). Future Phase 3/4 cards are created only when their phase is reached.
+
+## Amendments
+
+The record below is left as written; these note where the built system has since
+diverged from it, and why.
+
+### 2026-08-24 — the Phase 2 ingest demo is superseded by benchmark bookends
+
+Phase 2 delivered `cmd/demo`, `internal/demo` and `run.sh`: an offline
+token-ingest comparison whose result was published as a static table in the
+README. That table has been replaced by the benchmark's **bookends**
+(`go run ./cmd/benchmark -bookends`), and the demo code is deleted.
+
+The reason is evidentiary, not cosmetic. The demo's HDF side was a *hand-written
+optimal call* asserted by us and pinned to nothing, which invites exactly the
+objection the study exists to survive — that we wrote our own steelman. The
+bookends compute the same ceiling per **graded** question, against the same
+ground truth the two-arm study grades on, so the ideal and the measured result
+are the same questions and can be compared row by row. The bookends also print
+the questions whose oracle is *unreachable* through the bounded read surface,
+which the demo's table had no way to express.
+
+This reverses an earlier decision (recorded in the notes on hdf-libs-uqhe.5) to
+keep the Phase-2 table as reproducible demo output. Owner-approved on the
+grounds that the replacement *measures* what the table asserted.
+
+Tracked as hdf-libs-uqhe.11. Phase 2's primer sections in the README remain — it
+is only the token-ingest demonstration that moved.

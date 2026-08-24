@@ -8,7 +8,7 @@ It gives you two numbers, and they answer different questions:
 
 | | What it measures | What it needs |
 |---|---|---|
-| [Ingest ceiling](#the-ingest-ceiling-offline-model-free) (`./run.sh`) | Best-case bytes saved, under ideal play by both sides | Nothing — offline, seconds |
+| [Ingest ceiling](#the-ingest-ceiling-offline-model-free) (`-bookends`) | Best-case bytes saved, under ideal play by both sides | Nothing — offline, seconds |
 | [Graded study](#the-graded-study-run-it-on-your-own-hardware) (`./bench.sh`) | Whether a real model gets the right answer, and what it actually spent | A local model via Ollama, or any OpenAI-compatible endpoint (e.g. LiteLLM) |
 
 The ceiling is large. The graded result is the honest one, and on small scans it can favour the raw arm. Both are here on purpose.
@@ -29,16 +29,17 @@ Security pipelines produce *unlike* scan output — SAST, DAST, SBOM, vulnerabil
   export HDF_BIN="$PWD/../hdf-libs/hdf-cli/hdf"
   ```
 
-- **Only for the graded study** ([below](#the-graded-study-run-it-on-your-own-hardware)): either [Ollama](https://ollama.com/download) for local models, or an OpenAI-compatible endpoint. The offline demo above needs neither.
+- **Only for the graded study** ([below](#the-graded-study-run-it-on-your-own-hardware)): either [Ollama](https://ollama.com/download) for local models, or an OpenAI-compatible endpoint. The offline bookends need neither.
 
 ## Run
 
 ```bash
-./run.sh          # offline: locates hdf, runs the tests, prints the demo table
-./bench.sh        # graded study against your local models (needs Ollama)
+go run ./cmd/benchmark -bookends   # offline: the token ceiling and oracle, no model
+./bench.sh                         # graded study against your local models (needs Ollama)
+go test ./...                      # the suite (set HDF_BIN, or put hdf on PATH)
 ```
 
-`run.sh` is model-free — it counts tokens and finishes in seconds. `bench.sh` drives real models through both arms and is the study proper; see [below](#the-graded-study-run-it-on-your-own-hardware).
+`-bookends` is model-free and finishes in seconds. `bench.sh` drives real models through both arms and is the study proper; see [below](#the-graded-study-run-it-on-your-own-hardware). Both locate `hdf` the same way — `HDF_BIN`, else `PATH`.
 
 ## Using the HDF MCP well — the patterns this demo shows
 
@@ -73,37 +74,45 @@ This is an **upper bound on what normalization can save on ingest**, not a predi
 
 So the ratios below are best-case-HDF over worst-case-raw. They are useful for sizing the *headroom* normalization buys, and useless as a cost forecast. For what a real model actually spends — often with HDF costing **more** on small scans — see [the graded study](#the-graded-study-run-it-on-your-own-hardware).
 
-Counted with the same O200k encoding the server budgets against. Model-free, offline, reproducible via `./run.sh`.
+Counted with the same O200k encoding the server budgets against, and computed per graded question rather than asserted — `go run ./cmd/benchmark -bookends` regenerates the table below in seconds, with no model, endpoint, or provider.
 
 ```
-category                              raw tok    HDF tok   raw/HDF
-------------------------------------------------------------------
-1 single-fact (small src)                1537        274      5.6x
-1 single-fact (large src)              155964       2774     56.2x
-2 cross-format aggregate               185656        704    263.7x
-2 cross-doc join (SBOM x vuln)         156715       3026     51.8x
-3 compliance rollup (vuln)             155964        240    649.9x
-3 compliance rollup (CCE)              336002        268   1253.7x
-4 temporal diff                        185759       2669     69.6x
-5 tool-specific field (HDF loses)      155964     158739      1.0x
-------------------------------------------------------------------
-TOTAL                                 1333561     168694      7.9x
+question                  rawCeil   oracle  idealMult   note
+------------------------------------------------------------
+gosec-distinct-rules         1537      275      0.18x
+gosec-total-findings         1537        —          —   oracle unreachable: result-level finding volume; the read surface projects requirement counts only
+grype-match-count          155964      295    0.0019x
+grype-cve-present          155964      232    0.0015x
+grype-compliance-rate      155964      237    0.0015x
+grype-has-critical         155964      295    0.0019x
+grype-related-vulns        155964        —          —   oracle unreachable: preserved verbatim in the requirement's code field, which no read tool projects
+zap-alert-count             28155      274    0.0097x
+inspec-control-count       336002      288   0.00086x
+inspec-compliance-rate     336002      271   0.00081x
+zap-high-severity-count     28155      270    0.0096x
+cross-format-high-count    185656      750     0.004x
+grype-fixed-vulns          307031     2717    0.0088x
+sbom-vuln-free-packages    177175        —          —   oracle unreachable: the join key (package inventory) is carried as a BOM reference, not embedded — no HDF document or read tool holds it
 ```
 
-Under those assumptions HDF is leaner everywhere the question is answerable from normalized fields. **Category 5 is deliberately the honest counter-example:** it asks for a tool-specific field (grype's `matchDetails`), and the HDF arm has to pay for the raw bytes anyway — HDF adds overhead and **loses** (1.0×).
+`rawCeil` is the whole raw file(s) the question spans; `oracle` is the hand-optimal HDF call's actual response; `idealMult` is oracle ÷ ceiling, so **smaller is better for HDF**.
+
+The three `—` rows matter more than the small numbers. They are questions the bounded read surface **cannot** answer at any price, and they are printed rather than quietly omitted — a table that showed only the favourable rows would be the steelman objection made real.
+
+Under those assumptions HDF is leaner everywhere the question is answerable from normalized fields. **`grype-related-vulns` is deliberately the honest counter-example:** it asks for a tool-specific field, the oracle is unreachable, and the HDF arm has to pay for the raw bytes anyway — so HDF adds overhead and loses outright.
 
 The mechanism is worth stating precisely, because it is not information loss. Conversion preserves the original scanner finding **byte-for-byte** in the requirement's `code` field, so nothing is dropped. What costs the HDF arm is that no read tool *projects* `code` — `hdf_query`'s full-verbosity row carries id, title, status, severity, impact, baseline, tags and descriptions, and nothing else. So the limit here is the **bounded read surface**, not lossy normalization: the data is in the document and unreachable through the tools. The graded study's `grype-related-vulns` question measures exactly this, and grades the HDF arm on it rather than excusing it.
 
 ### Read the numbers honestly
 
-- **Token *ingest*, not end-to-end agent cost.** This measures what enters context under ideal play. Real accuracy and cost are the graded study.
+- **Token *ingest*, not end-to-end agent cost.** This measures what enters context under ideal play. Real accuracy and cost are the graded study — the same questions, so the two tables are directly comparable per row.
 - **Do not quote these as agent savings.** A real two-arm run over these same fixtures produces very different numbers, sometimes favouring the raw arm — which is the point of running it rather than assuming.
 - **Amortized (pipeline) case.** The HDF side assumes documents are already normalized. A one-shot "convert then ask once" pays the conversion cost too.
 - **A whole-system result.** The win is HDF-MCP-as-a-system (normalization + a token-bounded surface), not the schema alone.
 
 ## The graded study: run it on your own hardware
 
-`./run.sh` answers "how many tokens does each approach cost?" without a model. The graded study (`cmd/benchmark`, ADR-0002) answers the harder question: **does a model actually get the right answer**, and at what real token cost? The bank spans small scans (gosec, ZAP), a medium one (grype), a 1.2MB InSpec compliance run, and the category-5 case where the HDF arm is expected to lose, so the large-document regime and the honest counter-example are both covered. Each vetted question is put to the same model twice — once over raw scan files with grep and paginated reads, once over the HDF MCP tools — and graded against class-appropriate ground truth.
+`-bookends` answers "how few tokens *could* each approach cost?" without a model. The graded study (`cmd/benchmark`, ADR-0002) answers the harder question: **does a model actually get the right answer**, and at what real token cost? The bank spans small scans (gosec, ZAP), a medium one (grype), a 1.2MB InSpec compliance run, and the category-5 case where the HDF arm is expected to lose, so the large-document regime and the honest counter-example are both covered. Each vetted question is put to the same model twice — once over raw scan files with grep and paginated reads, once over the HDF MCP tools — and graded against class-appropriate ground truth.
 
 It runs entirely on your own machine through Ollama, so it costs nothing and no data leaves the box. This — not the [ingest ceiling](#the-ingest-ceiling-offline-model-free) above — is the number to quote about agent cost.
 
