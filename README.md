@@ -97,6 +97,8 @@ sbom-vuln-free-packages    177175        —          —   oracle unreachable: 
 
 `rawCeil` is the whole raw file(s) the question spans; `oracle` is the hand-optimal HDF call's actual response; `idealMult` is oracle ÷ ceiling, so **smaller is better for HDF**.
 
+To check those assumptions against reality, run the graded study and read its `vsCeil` and `vsOracle` columns: they report what each model actually spent as a multiple of these two bookends, per question. `vsCeil` well under 1 means the raw arm's grep-and-paginate beat the whole-file ceiling — which it usually does, and which is why the ceiling is not a cost forecast. `vsOracle` far above 1 is the HDF arm's real overhead against its own ideal.
+
 The three `—` rows matter more than the small numbers. They are questions the bounded read surface **cannot** answer at any price, and they are printed rather than quietly omitted — a table that showed only the favourable rows would be the steelman objection made real.
 
 Under those assumptions HDF is leaner everywhere the question is answerable from normalized fields. **`grype-related-vulns` is deliberately the honest counter-example:** it asks for a tool-specific field, the oracle is unreachable, and the HDF arm has to pay for the raw bytes anyway — so HDF adds overhead and loses outright.
