@@ -186,6 +186,26 @@ Tracked from the hdf-libs board under epic `uqhe`: `uqhe.1` (the signal probe �
 The record below is left as written; these note where the built system has since
 diverged from it, and why.
 
+### 2026-08-24 — Phase 3 shipped as `cmd/benchmark`, not `cmd/study`
+
+The Implementation Plan above specifies `cmd/study/`. The graded two-arm harness
+shipped as **`cmd/benchmark/`**, with its grading in `internal/benchmark/` rather
+than the planned `internal/grade/`. The owner has decided to keep the shipped
+name rather than rename to match this ADR.
+
+This is worth recording rather than leaving as a silent contradiction, because
+the Decision section above argues the opposite framing — *"Teaching-first beats
+benchmark-first. A primer someone can run and learn from is a more useful and
+more durable artifact than a courtroom exhibit"* — so the command is named for
+the very word the ADR chose to avoid. The framing still holds: the repo leads
+with the primer, and the graded numbers exist to be checked rather than
+brandished. But the artifact that produces them is a benchmark, it is referred to
+as one in every card and commit, and renaming it now would break more references
+than the consistency is worth.
+
+Anyone reading the plan should therefore map `cmd/study` → `cmd/benchmark` and
+`internal/grade` → `internal/benchmark` throughout.
+
 ### 2026-08-24 — the Phase 2 ingest demo is superseded by benchmark bookends
 
 Phase 2 delivered `cmd/demo`, `internal/demo` and `run.sh`: an offline
@@ -208,3 +228,21 @@ grounds that the replacement *measures* what the table asserted.
 
 Tracked as hdf-libs-uqhe.11. Phase 2's primer sections in the README remain — it
 is only the token-ingest demonstration that moved.
+
+### Which number forecasts agent cost
+
+The two measurements this repo produces are not interchangeable, and conflating
+them has already caused real confusion — a reader who took the ceiling for a cost
+forecast could not reproduce it against a live endpoint, because no model is
+involved in producing it.
+
+| Measurement | Produced by | What it is |
+|---|---|---|
+| **Ingest ceiling** | `cmd/benchmark -bookends` | A **best case**. The raw side is charged for whole files; the HDF side gets a hand-optimal call. Offline, model-free. Useful for sizing headroom. **Not a cost forecast.** |
+| **Graded study** | `cmd/benchmark` against a real model | What a model **actually** spent and whether it got the right answer. On small scans it can favour the raw arm. **This is the number that forecasts agent cost.** |
+
+The graded report's `vsCeil` and `vsOracle` columns tie them together per
+question: what the model spent as a multiple of each bookend. A `vsCeil` below 1
+means the raw arm's grep-and-paginate beat the whole-file ceiling, which is the
+usual case and the clearest evidence that the ceiling must not be quoted as a
+saving.
