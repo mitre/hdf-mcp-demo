@@ -95,3 +95,79 @@ func TestKeySelection(t *testing.T) {
 		t.Errorf("Class C hdf-arm key = %q, want the HDF value 3", got.Value)
 	}
 }
+
+// TestGrade_DecliningReplyAbstains pins the rule grade.go states about itself:
+// prefer a false Abstained over a false anything-else. A reply that declines
+// asserts nothing, so it must never be recorded as a confident wrong answer —
+// that reads downstream as a capability failure when it is usually a broken
+// tool call. The count path already guarded this; the bool path did not.
+func TestGrade_DecliningReplyAbstains(t *testing.T) {
+	answerable := truth.Answered("true")
+	for _, tc := range []struct {
+		name  string
+		reply string
+	}{
+		{"cannot answer, mentions yes/no", "I could not open the document, so I cannot give a definitive yes/no answer."},
+		{"tool failed", "The tool returned an error, so I am unable to determine whether it is present."},
+		{"no data", "I don't know — there is no data available to answer this."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Grade(tc.reply, answerable, KindBool); got != Abstained {
+				t.Errorf("Grade(%q) = %s, want %s", tc.reply, got, Abstained)
+			}
+		})
+	}
+}
+
+// TestGrade_AnswerLineBeatsTrailingCommentary pins that an ANSWER line is read
+// as its value, not as a bag of words. Models routinely echo the system prompt's
+// format template after the value; that echo carries both "yes" and "no" and was
+// outvoting the answer the model actually gave.
+func TestGrade_AnswerLineBeatsTrailingCommentary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+		key   truth.Answer
+		kind  Kind
+		want  Verdict
+	}{
+		{"echoed template after yes", "ANSWER: yes — where <value> is a single number, or a single yes/no, and nothing else on that line.", truth.Answered("true"), KindBool, Correct},
+		{"echoed template after no", "ANSWER: no — where <value> is a single number, or a single yes/no, and nothing else on that line.", truth.Answered("false"), KindBool, Correct},
+		{"prose justification after yes", "ANSWER: yes — the CVE identifier appears in the grype.json scan.", truth.Answered("true"), KindBool, Correct},
+		{"echoed template after count", "ANSWER: 3 — where <value> is a single number, and nothing else on that line.", truth.Answered("3"), KindCount, Correct},
+		{"wrong value still wrong", "ANSWER: no — where <value> is a single yes/no.", truth.Answered("true"), KindBool, Wrong},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Grade(tc.reply, tc.key, tc.kind); got != tc.want {
+				t.Errorf("Grade(%q) = %s, want %s", tc.reply, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGrade_ContradictoryReplyAbstains covers the whole-reply fallback: when a
+// reply carries both signals and no ANSWER line to disambiguate, the honest
+// verdict is Abstained. Resolving silently to "no" (the old first-match-wins
+// order) invented a confident answer the model never gave.
+func TestGrade_ContradictoryReplyAbstains(t *testing.T) {
+	reply := "Results are mixed: yes for the openssl package, no for zlib."
+	if got := Grade(reply, truth.Answered("true"), KindBool); got != Abstained {
+		t.Errorf("Grade(contradictory) = %s, want %s", got, Abstained)
+	}
+}
+
+// TestGrade_NegationsStillNegative guards the fix from over-correcting: the
+// negated phrasings contain positive words ("not present" contains "present"),
+// and value-only parsing must not re-read them as affirmations.
+func TestGrade_NegationsStillNegative(t *testing.T) {
+	for _, reply := range []string{
+		"ANSWER: not present",
+		"ANSWER: it is not found in the scan",
+		"ANSWER: false",
+		"ANSWER: no",
+	} {
+		if got := Grade(reply, truth.Answered("false"), KindBool); got != Correct {
+			t.Errorf("Grade(%q) with key=false = %s, want %s", reply, got, Correct)
+		}
+	}
+}
