@@ -3,6 +3,7 @@ package benchmark
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
@@ -24,7 +25,7 @@ func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) s
 	for _, bk := range bks {
 		bkByID[bk.ID] = bk
 	}
-	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s %7s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "mult", "rawSec", "hdfSec")
+	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %12s %12s %7s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "mult", "rawSec", "hdfSec")
 	if len(bks) > 0 {
 		hdr += fmt.Sprintf(" %8s %8s", "vsCeil", "vsOracle")
 	}
@@ -33,9 +34,9 @@ func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) s
 	}
 	b.WriteString(hdr + "\n" + strings.Repeat("-", len(hdr)) + "\n")
 	for _, r := range results {
-		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d %7s %7.1f %7.1f",
+		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %12s %12s %7s %7.1f %7.1f",
 			trunc(r.ID, 22), typeLabel(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
-			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
+			tokensWithSpread(r.Raw), tokensWithSpread(r.HDF),
 			ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 			r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 		if len(bks) > 0 {
@@ -311,6 +312,16 @@ func totals(rs []QuestionResult) (raw, hdf, adhoc int) {
 		}
 	}
 	return
+}
+
+// tokensWithSpread renders an arm's mean token cost, carrying the spread across
+// trials when the question was repeated. A K>1 run whose report looks identical
+// to a single run invites reading a mean as an exact measurement.
+func tokensWithSpread(a ArmResult) string {
+	if a.TokenStdDev < 0.5 {
+		return strconv.Itoa(a.Cost.TotalTokens())
+	}
+	return fmt.Sprintf("%d±%.0f", a.Cost.TotalTokens(), a.TokenStdDev)
 }
 
 // elapsedTotals sums each arm's wall-clock across questions.

@@ -366,8 +366,8 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 			fmt.Fprintf(&b, "|---|---|---|---|--:|--:|--:|--:|--:|%s\n", bkDashes)
 		}
 		for _, r := range run.Results {
-			row := fmt.Sprintf("| %s | %s | %s | %s | %d | %d | %s | %.1f | %.1f |",
-				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens(),
+			row := fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %.1f | %.1f |",
+				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, tokensWithSpread(r.Raw), tokensWithSpread(r.HDF),
 				ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
 				r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 			if len(bks) > 0 {

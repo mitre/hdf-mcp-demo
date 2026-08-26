@@ -293,3 +293,29 @@ func TestFailureReasonsSurfaced(t *testing.T) {
 		}
 	}
 }
+
+// TestVarianceShownWhenRepeated pins that a multi-trial run SHOWS its variance.
+// Token stddev was computed and carried in JSON but never rendered in the human
+// formats, so a K=3 report looked identical to a single run and invited reading
+// a mean as an exact measurement.
+func TestVarianceShownWhenRepeated(t *testing.T) {
+	runs := sampleRuns()
+	runs[0].Results[0].Raw.TokenStdDev = 42.5
+	runs[0].Results[0].HDF.TokenStdDev = 17.25
+
+	txt := Render(runs[0].Model, runs[0].Results, false, nil)
+	if !strings.Contains(txt, "±42") || !strings.Contains(txt, "±17") {
+		t.Errorf("text report omits token stddev:\n%s", txt)
+	}
+	md := RenderMarkdown(RunMeta{Models: []string{"m"}, Repeat: 3}, runs, false, nil)
+	if !strings.Contains(md, "±42") || !strings.Contains(md, "±17") {
+		t.Errorf("markdown report omits token stddev:\n%s", md)
+	}
+
+	// A single-trial run has no variance to show and must stay uncluttered.
+	runs[0].Results[0].Raw.TokenStdDev = 0
+	runs[0].Results[0].HDF.TokenStdDev = 0
+	if got := Render(runs[0].Model, runs[0].Results, false, nil); strings.Contains(got, "±") {
+		t.Errorf("single-trial report should not show a ± column:\n%s", got)
+	}
+}
