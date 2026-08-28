@@ -195,6 +195,10 @@ Leave headroom: the context window costs memory on top of the weights, and each 
 | `-adhoc` | Also measure the conversion-included cost view, rather than assuming documents are already normalized. |
 | `-transcripts` | Write one JSON transcript per question/arm/sample (every prompt, tool definition, tool call, and the graded outcome) into this directory — the evidence trail for diagnosing an arm that fails or abstains. |
 
+## Docs
+
+- [`docs/interpreting-results.md`](docs/interpreting-results.md) — how to read a benchmark report: what the question types mean, how answers are graded, the two cost views, the bookends, and what the numbers do not settle. Reports link here rather than restating it.
+
 ## Fixtures
 
 Real security-tool output, vendored with provenance — see [`fixtures/PROVENANCE.md`](fixtures/PROVENANCE.md).

@@ -156,45 +156,27 @@ func classRowLabel(c truth.Class) string {
 // allClasses is the display order for the accuracy tables.
 var allClasses = []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC, truth.ClassD}
 
+// InterpretationDoc is where the long-form guidance lives. Reports link to it
+// rather than restating it: the notes are reference material that changes with
+// the methodology, and twenty-odd quoted lines appended to every artifact a run
+// produces is a copy that goes stale in every one of them independently.
+const InterpretationDoc = "docs/interpreting-results.md"
+
+// footer is the short pointer a report carries in place of the full notes.
 func footer(adHoc, bookends bool) string {
-	lines := []string{
-		"",
-		"notes / limitations (read before trusting a number):",
-		"  - Question types are a grading distinction, NOT a ranking. 'objective': one",
-		"    answer both arms should reach. 'interpretive': the fair answer depends on the",
-		"    question's intent, graded bidirectionally (e.g. distinct rule violations vs raw",
-		"    finding volume). 'hdf-only': raw scanners can't natively express it (compliance",
-		"    %, effective status) — the raw arm is out of remit. 'raw-only': the HDF view",
-		"    lacks the fact (e.g. an SBOM inventory carried as a reference, not embedded)",
-		"    — the hdf arm is out of remit.",
-		"  - Accuracy is scored only over questions an arm can answer. Out-of-remit arms",
-		"    report hallucinate-vs-abstain separately, not as a failure.",
-		"  - Grading parses an 'ANSWER: <value>' line; a correct answer buried in prose",
-		"    without that line may read as abstained. Grading favors abstention over false",
-		"    credit. No LLM judge is used.",
-		"  - Cost is real endpoint token usage; the hdf-mcp prompt tokens already include",
-		"    the tool-schema tax. Small scans can make HDF cost MORE — expected, and the",
-		"    point of measuring rather than assuming.",
-		"  - A 'failed' arm errored or timed out before answering. The raw arm uses grep +",
-		"    paginated reads with NO format hints, so it must discover the schema itself.",
-		"  - N is small and a single run is noisy; treat as directional, not definitive.",
-	}
+	var b strings.Builder
+	b.WriteString("\nhow to read these numbers — question types, grading, the two cost views,\n")
+	b.WriteString("and what they do not settle: " + InterpretationDoc + "\n")
 	if adHoc {
-		lines = append(lines,
-			"  - Pipeline view assumes conversion happened out-of-band (cost ~0/query); ad-hoc",
-			"    view charges the agent's on-demand hdf_convert round-trip.")
+		b.WriteString("  (this run reports both cost views: pipeline assumes conversion happened\n")
+		b.WriteString("   out of band; ad-hoc charges the agent's on-demand hdf_convert)\n")
 	}
 	if bookends {
-		lines = append(lines,
-			"  - Bookends are counted in O200k tokens; real usage comes from each model's own",
-			"    tokenizer, so bookend ratios are approximate.",
-			"  - hdf-vs-oracle > 1 even for perfect play: real arms pay the tool-schema tax",
-			"    and multi-turn accumulation the oracle excludes — that gap is part of what",
-			"    is being measured, not noise.")
+		b.WriteString("  (bookends are O200k-counted; real usage uses each model's own tokenizer,\n")
+		b.WriteString("   so bookend ratios are approximate)\n")
 	}
-	return strings.Join(lines, "\n") + "\n"
+	return b.String()
 }
-
 func filterClass(rs []QuestionResult, c truth.Class) []QuestionResult {
 	var out []QuestionResult
 	for _, r := range rs {

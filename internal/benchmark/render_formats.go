@@ -29,9 +29,19 @@ type RunMeta struct {
 	Repeat      int
 	Temperature float64
 	NumCtx      int // ollama only: the context window the run was given; 0 = provider default
-	// ModelBOMs are paths to per-model AI-BOM System documents written beside the
-	// report, so a run records WHICH weights produced it rather than only a tag.
-	ModelBOMs []string
+	// ModelProvenance names, per model, the two documents a run emits beside the
+	// report so it records WHICH weights produced it rather than only a tag.
+	ModelProvenance []ModelProvenance
+}
+
+// ModelProvenance is one model's provenance pair. They are distinct artifacts
+// and are named separately: BOM is the CycloneDX AI-BOM describing the model,
+// System is the HDF System document that ingests it. Calling the System document
+// "the BOM" would misdescribe the very record whose job is to be accurate.
+type ModelProvenance struct {
+	Model  string // the model tag the run used
+	BOM    string // CycloneDX ML-BOM filename, beside the report
+	System string // HDF System document filename, beside the report
 }
 
 // MetaText renders the run metadata as a short plain-text header.
@@ -52,8 +62,8 @@ func MetaText(m RunMeta) string {
 	if m.Provider != "" {
 		fmt.Fprintf(&b, "  cost:      %s\n", chargeStatement(m.Provider))
 	}
-	for _, p := range m.ModelBOMs {
-		fmt.Fprintf(&b, "  model BOM: %s\n", p)
+	for _, p := range m.ModelProvenance {
+		fmt.Fprintf(&b, "  provenance: %s — AI-BOM %s, HDF System %s\n", p.Model, p.BOM, p.System)
 	}
 	return b.String()
 }
@@ -80,6 +90,18 @@ func chargeStatement(provider string) string {
 	return "OpenAI-compatible endpoint — charge depends on the endpoint; the study requires a zero-charge instrument (free tier with no payment method, or self-hosted)"
 }
 
+// toJSONProvenance converts the provenance pairs for the JSON artifact.
+func toJSONProvenance(in []ModelProvenance) []jsonProvenance {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]jsonProvenance, 0, len(in))
+	for _, p := range in {
+		out = append(out, jsonProvenance{Model: p.Model, BOM: p.BOM, System: p.System})
+	}
+	return out
+}
+
 // tempStr renders a temperature, or "omitted" for the negative sentinel.
 func tempStr(t float64) string {
 	if t < 0 {
@@ -91,18 +113,25 @@ func tempStr(t float64) string {
 // --- JSON ---
 
 type jsonMeta struct {
-	Timestamp   string   `json:"timestamp,omitempty"`
-	Provider    string   `json:"provider,omitempty"`
-	Models      []string `json:"models"`
-	Concurrency int      `json:"concurrency"`
-	MaxTokens   int      `json:"maxTokens"`
-	MaxIters    int      `json:"maxIters"`
-	AdHoc       bool     `json:"adHoc"`
-	Repeat      int      `json:"repeat"`
-	Temperature float64  `json:"temperature"`
-	NumCtx      int      `json:"numCtx,omitempty"`
-	Cost        string   `json:"costStatement,omitempty"`
-	ModelBOMs   []string `json:"modelBOMs,omitempty"`
+	Timestamp       string           `json:"timestamp,omitempty"`
+	Provider        string           `json:"provider,omitempty"`
+	Models          []string         `json:"models"`
+	Concurrency     int              `json:"concurrency"`
+	MaxTokens       int              `json:"maxTokens"`
+	MaxIters        int              `json:"maxIters"`
+	AdHoc           bool             `json:"adHoc"`
+	Repeat          int              `json:"repeat"`
+	Temperature     float64          `json:"temperature"`
+	NumCtx          int              `json:"numCtx,omitempty"`
+	Cost            string           `json:"costStatement,omitempty"`
+	ModelProvenance []jsonProvenance `json:"modelProvenance,omitempty"`
+}
+
+// jsonProvenance mirrors ModelProvenance for the machine-readable artifact.
+type jsonProvenance struct {
+	Model  string `json:"model"`
+	BOM    string `json:"aiBom"`
+	System string `json:"hdfSystem"`
 }
 
 type jsonAnswer struct {
@@ -238,7 +267,7 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) (strin
 		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
 		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx,
-		Cost: chargeStatement(meta.Provider), ModelBOMs: meta.ModelBOMs,
+		Cost: chargeStatement(meta.Provider), ModelProvenance: toJSONProvenance(meta.ModelProvenance),
 	}}
 	for _, b := range bks {
 		report.Bookends = append(report.Bookends, jsonBookend{
@@ -337,8 +366,8 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 	if meta.Provider != "" {
 		fmt.Fprintf(&b, "- **cost:** %s\n", chargeStatement(meta.Provider))
 	}
-	for _, p := range meta.ModelBOMs {
-		fmt.Fprintf(&b, "- **model BOM:** `%s`\n", p)
+	for _, p := range meta.ModelProvenance {
+		fmt.Fprintf(&b, "- **provenance (%s):** AI-BOM `%s`, HDF System `%s`\n", p.Model, p.BOM, p.System)
 	}
 	b.WriteString("\n")
 
@@ -462,16 +491,16 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 }
 
 // markdownFooter renders the text footer's limitations note as a markdown blockquote.
+// markdownFooter is the report's pointer to the interpretation guide.
 func markdownFooter(adHoc, bookends bool) string {
-	text := strings.TrimSpace(footer(adHoc, bookends))
 	var b strings.Builder
-	b.WriteString("---\n\n> **Notes / limitations** (read before trusting a number)\n>\n")
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "notes / limitations") {
-			continue
-		}
-		fmt.Fprintf(&b, "> %s\n", strings.TrimPrefix(line, "- "))
+	b.WriteString("---\n\n**How to read these numbers** — question types, grading, the two cost views, ")
+	b.WriteString("and what they do not settle: [`" + InterpretationDoc + "`](../../" + InterpretationDoc + ")\n")
+	if adHoc {
+		b.WriteString("\n- Both cost views are reported: *pipeline* assumes conversion happened out of band; *ad-hoc* charges the agent's on-demand `hdf_convert`.\n")
+	}
+	if bookends {
+		b.WriteString("- Bookends are counted with O200k; real usage comes from each model's own tokenizer, so bookend ratios are approximate.\n")
 	}
 	return b.String()
 }

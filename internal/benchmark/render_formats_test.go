@@ -135,7 +135,7 @@ func TestRenderMarkdown(t *testing.T) {
 	md := RenderMarkdown(meta, sampleRuns(), false, nil)
 	for _, must := range []string{
 		"# HDF-MCP benchmark", "**models:** stub", "## stub", "| question | type |",
-		"objective", "interpretive", "hdf-only", "out of remit", "Notes / limitations",
+		"objective", "interpretive", "hdf-only", "out of remit", "docs/interpreting-results.md",
 	} {
 		if !strings.Contains(md, must) {
 			t.Errorf("markdown missing %q\n---\n%s", must, md)
@@ -317,5 +317,53 @@ func TestVarianceShownWhenRepeated(t *testing.T) {
 	runs[0].Results[0].HDF.TokenStdDev = 0
 	if got := Render(runs[0].Model, runs[0].Results, false, nil); strings.Contains(got, "±") {
 		t.Errorf("single-trial report should not show a ± column:\n%s", got)
+	}
+}
+
+// TestProvenanceNamesBothArtifacts fixes a labelling error: a run emits TWO
+// documents per model — the CycloneDX AI-BOM itself, and an HDF System document
+// that wraps it — and the report called the System document "the BOM". They are
+// not the same artifact, and a provenance record that misnames its own contents
+// is worse than one that says less.
+func TestProvenanceNamesBothArtifacts(t *testing.T) {
+	meta := RunMeta{
+		Models:   []string{"granite4.1:8b"},
+		Provider: "ollama",
+		ModelProvenance: []ModelProvenance{{
+			Model: "granite4.1:8b", BOM: "granite4.1_8b.model.cdx.json", System: "granite4.1_8b.model.system.json",
+		}},
+	}
+	for name, got := range map[string]string{"text": MetaText(meta), "markdown": RenderMarkdown(meta, nil, false, nil)} {
+		if !strings.Contains(got, "granite4.1_8b.model.cdx.json") {
+			t.Errorf("%s report omits the AI-BOM itself:\n%s", name, got)
+		}
+		if !strings.Contains(got, "granite4.1_8b.model.system.json") {
+			t.Errorf("%s report omits the HDF System document:\n%s", name, got)
+		}
+		// The System document must not be presented as the BOM.
+		if strings.Contains(got, "BOM:** `granite4.1_8b.model.system.json`") ||
+			strings.Contains(got, "BOM: granite4.1_8b.model.system.json") {
+			t.Errorf("%s report labels the HDF System document as the BOM:\n%s", name, got)
+		}
+	}
+}
+
+// TestFooterPointsAtDocsRatherThanEmbedding pins the second correction: the
+// interpretation notes are reference material that belongs in one maintained
+// document, not twenty-odd quoted lines appended to every report a run produces.
+func TestFooterPointsAtDocsRatherThanEmbedding(t *testing.T) {
+	md := RenderMarkdown(RunMeta{Models: []string{"m"}}, sampleRuns(), false, nil)
+	if !strings.Contains(md, "docs/interpreting-results.md") {
+		t.Errorf("report should point at the interpretation guide:\n%s", md)
+	}
+	// The long-form prose must no longer be inlined.
+	for _, inlined := range []string{
+		"Question types are a grading distinction",
+		"Grading favors abstention over false credit",
+		"treat as directional, not definitive",
+	} {
+		if strings.Contains(md, inlined) {
+			t.Errorf("report still embeds the notes prose (%q) instead of referencing it:\n%s", inlined, md)
+		}
 	}
 }
