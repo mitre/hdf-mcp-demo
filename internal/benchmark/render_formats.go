@@ -29,6 +29,9 @@ type RunMeta struct {
 	Repeat      int
 	Temperature float64
 	NumCtx      int // ollama only: the context window the run was given; 0 = provider default
+	// ModelBOMs are paths to per-model AI-BOM System documents written beside the
+	// report, so a run records WHICH weights produced it rather than only a tag.
+	ModelBOMs []string
 }
 
 // MetaText renders the run metadata as a short plain-text header.
@@ -48,6 +51,9 @@ func MetaText(m RunMeta) string {
 		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature), numCtxStr(m.NumCtx, " "))
 	if m.Provider != "" {
 		fmt.Fprintf(&b, "  cost:      %s\n", chargeStatement(m.Provider))
+	}
+	for _, p := range m.ModelBOMs {
+		fmt.Fprintf(&b, "  model BOM: %s\n", p)
 	}
 	return b.String()
 }
@@ -96,6 +102,7 @@ type jsonMeta struct {
 	Temperature float64  `json:"temperature"`
 	NumCtx      int      `json:"numCtx,omitempty"`
 	Cost        string   `json:"costStatement,omitempty"`
+	ModelBOMs   []string `json:"modelBOMs,omitempty"`
 }
 
 type jsonAnswer struct {
@@ -231,7 +238,7 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) (strin
 		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
 		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx,
-		Cost: chargeStatement(meta.Provider),
+		Cost: chargeStatement(meta.Provider), ModelBOMs: meta.ModelBOMs,
 	}}
 	for _, b := range bks {
 		report.Bookends = append(report.Bookends, jsonBookend{
@@ -329,6 +336,9 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature), numCtxStr(meta.NumCtx, ", "))
 	if meta.Provider != "" {
 		fmt.Fprintf(&b, "- **cost:** %s\n", chargeStatement(meta.Provider))
+	}
+	for _, p := range meta.ModelBOMs {
+		fmt.Fprintf(&b, "- **model BOM:** `%s`\n", p)
 	}
 	b.WriteString("\n")
 

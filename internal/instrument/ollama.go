@@ -125,6 +125,7 @@ func (o *Ollama) Chat(ctx context.Context, msgs []Message, tools []Tool) (Result
 // rather than discovering it as a mid-run loop failure.
 type LocalModel struct {
 	Name          string
+	Digest        string
 	ParameterSize string
 	Capabilities  []string
 }
@@ -157,6 +158,7 @@ func (o *Ollama) LocalModels(ctx context.Context) ([]LocalModel, error) {
 	var body struct {
 		Models []struct {
 			Name         string   `json:"name"`
+			Digest       string   `json:"digest"`
 			Capabilities []string `json:"capabilities"`
 			Details      struct {
 				ParameterSize string `json:"parameter_size"`
@@ -168,7 +170,7 @@ func (o *Ollama) LocalModels(ctx context.Context) ([]LocalModel, error) {
 	}
 	out := make([]LocalModel, 0, len(body.Models))
 	for _, m := range body.Models {
-		out = append(out, LocalModel{Name: m.Name, ParameterSize: m.Details.ParameterSize, Capabilities: m.Capabilities})
+		out = append(out, LocalModel{Name: m.Name, Digest: m.Digest, ParameterSize: m.Details.ParameterSize, Capabilities: m.Capabilities})
 	}
 	return out, nil
 }
@@ -225,4 +227,80 @@ func fromOllamaMessage(m olMessage) Message {
 		})
 	}
 	return out
+}
+
+// ModelIdentity is what a local model reports about itself. Every field is
+// optional: a blank field was not reported, and callers must not substitute a
+// placeholder — a benchmark's provenance record is only worth keeping if it
+// distinguishes "unreported" from "reported as empty".
+type ModelIdentity struct {
+	Name           string
+	Digest         string
+	Family         string
+	Architecture   string
+	ParameterSize  string
+	ParameterCount int64
+	Quantization   string
+	Format         string
+	License        string
+	Capabilities   []string
+}
+
+// ShowModel reads a pulled model's identity (POST /api/show, plus the digest
+// from /api/tags, which /api/show does not carry).
+func (o *Ollama) ShowModel(ctx context.Context, name string) (ModelIdentity, error) {
+	body, err := json.Marshal(map[string]any{"model": name})
+	if err != nil {
+		return ModelIdentity{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.BaseURL+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return ModelIdentity{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := o.HTTP.Do(req)
+	if err != nil {
+		return ModelIdentity{}, fmt.Errorf("ollama show (is `ollama serve` running at %s?): %w", o.BaseURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ModelIdentity{}, fmt.Errorf("ollama show returned %s", resp.Status)
+	}
+	var out struct {
+		Details struct {
+			Family        string `json:"family"`
+			ParameterSize string `json:"parameter_size"`
+			Quantization  string `json:"quantization_level"`
+			Format        string `json:"format"`
+		} `json:"details"`
+		ModelInfo    map[string]any `json:"model_info"`
+		Capabilities []string       `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ModelIdentity{}, err
+	}
+
+	id := ModelIdentity{
+		Name: name, Family: out.Details.Family, ParameterSize: out.Details.ParameterSize,
+		Quantization: out.Details.Quantization, Format: out.Details.Format, Capabilities: out.Capabilities,
+	}
+	if s, ok := out.ModelInfo["general.architecture"].(string); ok {
+		id.Architecture = s
+	}
+	if s, ok := out.ModelInfo["general.license"].(string); ok {
+		id.License = s
+	}
+	if f, ok := out.ModelInfo["general.parameter_count"].(float64); ok {
+		id.ParameterCount = int64(f)
+	}
+	// The digest identifies the exact weights; it lives on /api/tags, not /api/show.
+	if locals, err := o.LocalModels(ctx); err == nil {
+		for _, m := range locals {
+			if m.Name == name {
+				id.Digest = m.Digest
+				break
+			}
+		}
+	}
+	return id, nil
 }

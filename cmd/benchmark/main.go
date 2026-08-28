@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mitre/hdf-mcp-demo/internal/aibom"
 	"github.com/mitre/hdf-mcp-demo/internal/benchmark"
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 	"github.com/mitre/hdf-mcp-demo/internal/mcpclient"
@@ -125,6 +126,57 @@ func buildInstrument(cfg runConfig, base, model string) instrument.Instrument {
 		o.Temperature = &t
 	}
 	return o
+}
+
+// writeModelBOMs records which weights produced a run. For each local model it
+// reads the model's own reported identity, emits a CycloneDX ML-BOM, and ingests
+// it with `hdf system create` into an HDF System document written beside the
+// report — so the benchmark that produces HDF records its own provenance AS HDF.
+//
+// Failure here is never fatal: provenance is worth having, but not worth losing
+// a completed study over, so a problem is reported and the run keeps its results.
+func writeModelBOMs(ctx context.Context, cfg runConfig, bin string, models []string) []string {
+	if cfg.provider != "ollama" || cfg.outPath == "" {
+		return nil // nowhere to put them, or no local model to describe
+	}
+	dir := filepath.Dir(cfg.outPath)
+	base := instrument.NewOllama(endpoint(cfg), "")
+	var written []string
+	for _, m := range models {
+		id, err := base.ShowModel(ctx, m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "model provenance for %s unavailable (skipped): %v\n", m, err)
+			continue
+		}
+		doc, err := aibom.CycloneDX(aibom.Model{
+			Name: id.Name, Digest: id.Digest, Family: id.Family, Architecture: id.Architecture,
+			ParameterSize: id.ParameterSize, ParameterCount: id.ParameterCount,
+			Quantization: id.Quantization, Format: id.Format, License: id.License,
+			Capabilities: id.Capabilities,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "model provenance for %s unavailable (skipped): %v\n", m, err)
+			continue
+		}
+		safe := strings.NewReplacer(":", "_", "/", "_").Replace(m)
+		bomPath := filepath.Join(dir, safe+".model.cdx.json")
+		sysPath := filepath.Join(dir, safe+".model.system.json")
+		if err := os.WriteFile(bomPath, doc, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "write model BOM for %s (skipped): %v\n", m, err)
+			continue
+		}
+		out, err := exec.CommandContext(ctx, bin, "system", "create", bomPath,
+			"--from", "cyclonedx-mlbom", "-o", sysPath).CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hdf system create for %s (skipped): %v: %s\n", m, err, strings.TrimSpace(string(out)))
+			continue
+		}
+		// Record the basename: the document sits beside the report, so a relative
+		// name keeps a published report portable instead of embedding the path of
+		// whatever machine happened to run it.
+		written = append(written, filepath.Base(sysPath))
+	}
+	return written
 }
 
 // metaNumCtx reports the context window to record in the run metadata. It is an
@@ -359,6 +411,7 @@ func run(cfg runConfig) error {
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Provider: cfg.provider, Models: models,
 		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
 		Repeat: cfg.repeat, Temperature: cfg.temperature, NumCtx: metaNumCtx(cfg),
+		ModelBOMs: writeModelBOMs(ctx, cfg, bin, models),
 	}
 
 	// Bookends: the model-free token bracket (whole-file ceiling + hand-optimal

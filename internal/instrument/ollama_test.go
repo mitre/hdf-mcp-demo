@@ -118,3 +118,44 @@ func TestOllama_NumCtxSent(t *testing.T) {
 		})
 	}
 }
+
+// TestOllama_ShowModel checks the metadata read used for run provenance: real
+// reported values are surfaced, and fields the server does not report stay zero
+// rather than becoming empty strings a consumer would record as fact.
+func TestOllama_ShowModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/show" {
+			_, _ = w.Write([]byte(`{
+			  "details": {"family":"granite","parameter_size":"8.8B","quantization_level":"Q4_K_M","format":"gguf"},
+			  "model_info": {"general.architecture":"granite","general.license":"apache-2.0","general.parameter_count":8791592960},
+			  "capabilities": ["completion","tools"]
+			}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"models":[{"name":"granite4.1:8b","digest":"abc123","capabilities":["tools"]}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := NewOllama(srv.URL, "granite4.1:8b").ShowModel(context.Background(), "granite4.1:8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ field, got, want string }{
+		{"Name", got.Name, "granite4.1:8b"},
+		{"Family", got.Family, "granite"},
+		{"Architecture", got.Architecture, "granite"},
+		{"ParameterSize", got.ParameterSize, "8.8B"},
+		{"Quantization", got.Quantization, "Q4_K_M"},
+		{"License", got.License, "apache-2.0"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+	if got.ParameterCount != 8791592960 {
+		t.Errorf("ParameterCount = %d, want 8791592960", got.ParameterCount)
+	}
+	if len(got.Capabilities) != 2 {
+		t.Errorf("Capabilities = %v, want two", got.Capabilities)
+	}
+}
