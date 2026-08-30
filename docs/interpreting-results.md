@@ -32,6 +32,27 @@ answering. The raw arm works with grep and paginated reads and **no format
 hints**, so it must discover each scanner's schema itself — that discovery cost
 is part of what is being measured.
 
+## What the raw-file arm can do
+
+The raw arm is the study's denominator, so its capability determines what every
+comparison means. It has four tools: read a whole (small) file, search by
+substring **or regular expression** reporting the total **match** count with a
+window around each hit, select a value from JSON by dot path, and page through
+lines. Match counting matters because most real scan files are minified — every
+finding sits on one line, and counting matching *lines* answers 1 where the true
+count is hundreds.
+
+It deliberately does **not** have a shell. That keeps runs reproducible and keeps
+the arm from degenerating into "read the whole file", which would rebuild the
+whole-file strawman these measurements exist to avoid. A real agent in a CI
+container would have `grep` and `jq`; this arm approximates them, and is
+therefore a floor for what a competent raw-file agent achieves, not a ceiling.
+
+Tool responses are kept deliberately small. A response is re-sent on every later
+turn, so verbosity compounds: an earlier, more generous version of these same
+tools raised the arm's token cost 74% and made it hit the iteration cap more
+often. Richer tools made the agent worse until the responses were trimmed.
+
 ## The two cost views
 
 | view | what it assumes |
@@ -42,7 +63,28 @@ is part of what is being measured.
 Both are reported because both are real workflows, and they can disagree
 substantially.
 
+## The cost multiplier
+
+`mult` is `hdfTok / rawTok` for one question — above 1 means the HDF arm cost
+more. It is shown **only when both arms produced an answer**, and prints `—`
+otherwise.
+
+That restriction is not fussiness. A ratio between an arm that answered and one
+that gave up measures nothing, and it is not conservatively wrong in a known
+direction: a failing arm burns its whole iteration budget, so failures are
+*expensive*. In the two-model study, arms averaged 4,552 tokens when correct and
+7,955 when failed. Ratios across mismatched outcomes therefore flatter whichever
+side happened to quit.
+
 ## Bookends: ceiling and oracle
+
+**Oracle** is a term borrowed from testing, where it means a source of
+known-correct answers. Here it is the *ideal agent*: a tool call sequence written
+by hand in advance that answers the question perfectly on the first try, with no
+exploration and no wrong turns. The `oracle` column is the measured token size of
+what those calls actually returned when executed against the live server — not an
+estimate. It is a **cost** baseline only, and never influences whether an answer
+is graded correct; ground truth is computed separately from the document bytes.
 
 `rawCeil` is the whole raw file the question spans — a **pessimistic** raw
 baseline, since a real agent greps rather than reading everything. `oracle` is
