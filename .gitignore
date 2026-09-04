@@ -4,3 +4,9 @@
 *.test
 *.out
 coverage*
+
+# Ad-hoc benchmark runs written by bench.sh are scratch — they accumulate on every
+# invocation. Reports worth keeping (the study artifacts a card or the README cites)
+# go in results/published/, which IS tracked.
+results/*
+!results/published/

@@ -3,6 +3,7 @@ package benchmark
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
@@ -10,21 +11,38 @@ import (
 
 // Render formats a model's results: a per-question detail table, per-question-type
 // accuracy for each arm (scored only over questions the arm can answer), both
-// token-cost views, and an honesty footer. model names the instrument.
-func Render(model string, results []QuestionResult, adHoc bool) string {
+// token-cost views, the bookend check (when bks is non-nil), and an honesty
+// footer. model names the instrument.
+func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "model: %s   (%d questions)\n\n", model, len(results))
 
-	// Per-question detail.
-	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %8s %8s", "question", "type", "raw", "hdf", "rawTok", "hdfTok")
+	// Per-question detail. mult is that question's hdfTok/rawTok — the aggregate
+	// cost ratio hides which questions are the peaks and valleys. When bookends
+	// were computed, vsCeil and vsOracle locate each arm against its model-free
+	// assumption (raw spend / whole-file ceiling; hdf spend / hand-optimal oracle).
+	bkByID := make(map[string]Bookend, len(bks))
+	for _, bk := range bks {
+		bkByID[bk.ID] = bk
+	}
+	hdr := fmt.Sprintf("%-22s %-13s %-13s %-13s %12s %12s %7s %7s %7s", "question", "type", "raw", "hdf", "rawTok", "hdfTok", "mult", "rawSec", "hdfSec")
+	if len(bks) > 0 {
+		hdr += fmt.Sprintf(" %8s %8s", "vsCeil", "vsOracle")
+	}
 	if adHoc {
 		hdr += fmt.Sprintf(" %8s", "adhocTok")
 	}
 	b.WriteString(hdr + "\n" + strings.Repeat("-", len(hdr)) + "\n")
 	for _, r := range results {
-		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %8d %8d",
+		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %12s %12s %7s %7.1f %7.1f",
 			trunc(r.ID, 22), typeLabel(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
-			r.Raw.Cost.TotalTokens(), r.HDF.Cost.TotalTokens())
+			tokensWithSpread(r.Raw), tokensWithSpread(r.HDF),
+			costMultiplier(r),
+			r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
+		if len(bks) > 0 {
+			vc, vo := questionBookendRatios(r, bkByID)
+			line += fmt.Sprintf(" %8s %8s", vc, vo)
+		}
 		if adHoc {
 			ah := 0
 			if r.HDFAdHoc != nil {
@@ -65,9 +83,16 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 			hall, abst, outOf)
 	}
 
-	// Failed arms (errored/over-context/timeout) among scored questions.
+	// Failed arms (errored/over-context/timeout) among scored questions, followed
+	// by the distinct reasons so an all-failed run is diagnosable ("connection
+	// refused" vs. "reached max iterations") rather than a wall of "failed".
 	if rf, hf := failures(results, ArmRaw), failures(results, ArmHDF); rf > 0 || hf > 0 {
 		fmt.Fprintf(&b, "failed (errored/over-context/timeout): raw %d, hdf %d\n", rf, hf)
+		for _, arm := range []Arm{ArmRaw, ArmHDF} {
+			for _, fr := range failureDetail(results, arm) {
+				fmt.Fprintf(&b, "  %-3s %d×  %s\n", armShort(arm), fr.Count, fr.Msg)
+			}
+		}
 	}
 
 	// Cost views.
@@ -79,7 +104,22 @@ func Render(model string, results []QuestionResult, adHoc bool) string {
 		fmt.Fprintf(&b, "  hdf-mcp arm (ad-hoc convert) . %8d   %s vs raw\n", adhocTok, ratio(adhocTok, rawTok))
 	}
 
-	b.WriteString(footer(adHoc))
+	// Wall-clock, reported next to tokens because they can disagree: a bounded
+	// tool response is cheap in tokens yet costs a round trip, and locally the
+	// round trip is often what the user actually waits on.
+	rawSec, hdfSec, adhocSec := elapsedTotals(results)
+	b.WriteString("\nwall-clock (sum of arm latencies, seconds):\n")
+	fmt.Fprintf(&b, "  raw-file arm ................. %8.1f\n", rawSec)
+	fmt.Fprintf(&b, "  hdf-mcp arm (pipeline) ....... %8.1f   %s vs raw\n", hdfSec, ratioF(hdfSec, rawSec))
+	if adHoc {
+		fmt.Fprintf(&b, "  hdf-mcp arm (ad-hoc convert) . %8.1f   %s vs raw\n", adhocSec, ratioF(adhocSec, rawSec))
+	}
+
+	if c, ok := checkBookends(results, bks); ok {
+		b.WriteString(renderBookendCheckText(c))
+	}
+
+	b.WriteString(footer(adHoc, len(bks) > 0))
 	return b.String()
 }
 
@@ -116,37 +156,27 @@ func classRowLabel(c truth.Class) string {
 // allClasses is the display order for the accuracy tables.
 var allClasses = []truth.Class{truth.ClassA, truth.ClassB, truth.ClassC, truth.ClassD}
 
-func footer(adHoc bool) string {
-	lines := []string{
-		"",
-		"notes / limitations (read before trusting a number):",
-		"  - Question types are a grading distinction, NOT a ranking. 'objective': one",
-		"    answer both arms should reach. 'interpretive': the fair answer depends on the",
-		"    question's intent, graded bidirectionally (e.g. distinct rule violations vs raw",
-		"    finding volume). 'hdf-only': raw scanners can't natively express it (compliance",
-		"    %, effective status) — the raw arm is out of remit. 'raw-only': a tool-specific",
-		"    field HDF drops — the hdf arm is out of remit (rare; these converters are",
-		"    near-lossless, so a genuine raw-only question is hard to construct here).",
-		"  - Accuracy is scored only over questions an arm can answer. Out-of-remit arms",
-		"    report hallucinate-vs-abstain separately, not as a failure.",
-		"  - Grading parses an 'ANSWER: <value>' line; a correct answer buried in prose",
-		"    without that line may read as abstained. Grading favors abstention over false",
-		"    credit. No LLM judge is used.",
-		"  - Cost is real endpoint token usage; the hdf-mcp prompt tokens already include",
-		"    the tool-schema tax. Small scans can make HDF cost MORE — expected, and the",
-		"    point of measuring rather than assuming.",
-		"  - A 'failed' arm errored or timed out before answering. The raw arm uses grep +",
-		"    paginated reads with NO format hints, so it must discover the schema itself.",
-		"  - N is small and a single run is noisy; treat as directional, not definitive.",
-	}
-	if adHoc {
-		lines = append(lines,
-			"  - Pipeline view assumes conversion happened out-of-band (cost ~0/query); ad-hoc",
-			"    view charges the agent's on-demand hdf_convert round-trip.")
-	}
-	return strings.Join(lines, "\n") + "\n"
-}
+// InterpretationDoc is where the long-form guidance lives. Reports link to it
+// rather than restating it: the notes are reference material that changes with
+// the methodology, and twenty-odd quoted lines appended to every artifact a run
+// produces is a copy that goes stale in every one of them independently.
+const InterpretationDoc = "docs/interpreting-results.md"
 
+// footer is the short pointer a report carries in place of the full notes.
+func footer(adHoc, bookends bool) string {
+	var b strings.Builder
+	b.WriteString("\nhow to read these numbers — question types, grading, the two cost views,\n")
+	b.WriteString("and what they do not settle: " + InterpretationDoc + "\n")
+	if adHoc {
+		b.WriteString("  (this run reports both cost views: pipeline assumes conversion happened\n")
+		b.WriteString("   out of band; ad-hoc charges the agent's on-demand hdf_convert)\n")
+	}
+	if bookends {
+		b.WriteString("  (bookends are O200k-counted; real usage uses each model's own tokenizer,\n")
+		b.WriteString("   so bookend ratios are approximate)\n")
+	}
+	return b.String()
+}
 func filterClass(rs []QuestionResult, c truth.Class) []QuestionResult {
 	var out []QuestionResult
 	for _, r := range rs {
@@ -209,6 +239,52 @@ func failures(rs []QuestionResult, arm Arm) int {
 	return n
 }
 
+// failureReason is one distinct error message among an arm's failed questions,
+// with how many questions shared it.
+type failureReason struct {
+	Msg   string
+	Count int
+}
+
+// failureDetail collects the distinct errors among an arm's failed questions,
+// most frequent first (message-sorted within a count for determinism). A single
+// endpoint outage collapses to one line; a mix of transport errors and max-iters
+// timeouts shows each. This is what turns the report's bare "failed" count into
+// something a reader can act on.
+func failureDetail(rs []QuestionResult, arm Arm) []failureReason {
+	counts := map[string]int{}
+	for _, r := range rs {
+		a := armOf(r, arm)
+		if a.Verdict != Failed {
+			continue
+		}
+		msg := a.Err
+		if msg == "" {
+			msg = "(no error recorded)"
+		}
+		counts[msg]++
+	}
+	out := make([]failureReason, 0, len(counts))
+	for m, c := range counts {
+		out = append(out, failureReason{Msg: m, Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Msg < out[j].Msg
+	})
+	return out
+}
+
+// armShort is the compact arm tag used in the failure-reason lines.
+func armShort(a Arm) string {
+	if a == ArmHDF {
+		return "hdf"
+	}
+	return "raw"
+}
+
 func totals(rs []QuestionResult) (raw, hdf, adhoc int) {
 	for _, r := range rs {
 		raw += r.Raw.Cost.TotalTokens()
@@ -218,6 +294,56 @@ func totals(rs []QuestionResult) (raw, hdf, adhoc int) {
 		}
 	}
 	return
+}
+
+// costMultiplier is hdfTok/rawTok, shown only when BOTH arms produced an answer.
+//
+// A ratio between an arm that answered and one that gave up measures nothing.
+// It is not even conservatively wrong: in this study a failed arm averaged 7,955
+// tokens against 4,552 for a correct one, because failure burns the whole
+// iteration budget — so a mismatched pair can make either side look efficient
+// depending on which one quit. Printing "—" says that plainly.
+func costMultiplier(r QuestionResult) string {
+	if !answered(r.Raw.Verdict) || !answered(r.HDF.Verdict) {
+		return "—"
+	}
+	return ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens())
+}
+
+// answered reports whether an arm produced an answer at all — correct, wrong, or
+// out-of-remit-but-asserted. Abstaining and failing are both "no answer".
+func answered(v Verdict) bool {
+	return v == Correct || v == Wrong || v == Hallucinated
+}
+
+// tokensWithSpread renders an arm's mean token cost, carrying the spread across
+// trials when the question was repeated. A K>1 run whose report looks identical
+// to a single run invites reading a mean as an exact measurement.
+func tokensWithSpread(a ArmResult) string {
+	if a.TokenStdDev < 0.5 {
+		return strconv.Itoa(a.Cost.TotalTokens())
+	}
+	return fmt.Sprintf("%d±%.0f", a.Cost.TotalTokens(), a.TokenStdDev)
+}
+
+// elapsedTotals sums each arm's wall-clock across questions.
+func elapsedTotals(rs []QuestionResult) (raw, hdf, adhoc float64) {
+	for _, r := range rs {
+		raw += r.Raw.Cost.Elapsed.Seconds()
+		hdf += r.HDF.Cost.Elapsed.Seconds()
+		if r.HDFAdHoc != nil {
+			adhoc += r.HDFAdHoc.Cost.Elapsed.Seconds()
+		}
+	}
+	return
+}
+
+// ratioF is ratio for float measures.
+func ratioF(n, d float64) string {
+	if d == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2fx", n/d)
 }
 
 func frac(n, d int) string {

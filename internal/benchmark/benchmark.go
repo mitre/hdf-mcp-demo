@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,16 @@ type Options struct {
 	AdHoc       bool   // also measure the conversion-included HDF cost view
 	Concurrency int    // max questions in flight at once (default 1 = serial)
 	Repeat      int    // runs per arm (default 1); >1 yields accuracy rates and cost variance
+	// TranscriptDir, when set, writes one JSON transcript per (question, arm,
+	// sample) under <dir>/<model>/ — the full conversation, tool definitions, and
+	// graded outcome — so a failing or abstaining arm is diagnosable from evidence.
+	TranscriptDir string
+	// Tools, when non-nil, restricts the HDF arm's advertised tool surface.
+	// nil means the full read surface.
+	Tools map[string]bool
+	// Progress, if set, is called once per question as it completes (serialized, so
+	// the callback need not be thread-safe) — for liveness during a long run.
+	Progress func(model, questionID string, done, total int)
 }
 
 func (o Options) repeat() int {
@@ -122,14 +134,18 @@ func adHocTools() map[string]bool {
 // to root; fixturesDir holds the raw fixtures. Questions are graded concurrently
 // (bounded by Options.Concurrency); a per-question/arm failure is recorded, never
 // fatal. Only setup errors (staging/conversion) abort.
-func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Session, fixturesDir, root string, bank []Question, opts Options) ([]QuestionResult, error) {
-	rawBytes, err := stageAndConvert(ctx, sess, fixturesDir, root, bank)
+func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Session, bin, fixturesDir, root string, bank []Question, opts Options) ([]QuestionResult, error) {
+	rawBytes, err := stageAndConvert(ctx, sess, bin, fixturesDir, root, bank)
 	if err != nil {
 		return nil, err
 	}
 
 	rawTB := agent.NewRawFileToolBox(root)
-	mcpTB, err := agent.NewMCPToolBox(ctx, sess, agent.ReadTools)
+	allow := opts.Tools
+	if allow == nil {
+		allow = agent.ReadTools
+	}
+	mcpTB, err := agent.NewMCPToolBox(ctx, sess, allow)
 	if err != nil {
 		return nil, fmt.Errorf("build hdf toolbox: %w", err)
 	}
@@ -144,14 +160,22 @@ func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Sessio
 	errs := make([]error, len(bank))
 	sem := make(chan struct{}, opts.concurrency())
 	var wg sync.WaitGroup
+	var pmu sync.Mutex
+	done := 0
 	for i, q := range bank {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(i int, q Question) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			qr, qerr := runQuestion(ctx, inst, rawTB, mcpTB, adHocTB, root, rawBytes[q.Fixture], q, opts)
+			qr, qerr := runQuestion(ctx, inst, rawTB, mcpTB, adHocTB, root, rawBytes, q, opts)
 			results[i], errs[i] = qr, qerr
+			if opts.Progress != nil {
+				pmu.Lock()
+				done++
+				opts.Progress(inst.Name(), q.ID, done, len(bank))
+				pmu.Unlock()
+			}
 		}(i, q)
 	}
 	wg.Wait()
@@ -167,41 +191,64 @@ func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Sessio
 // runQuestion classifies one question and runs its arms. Arm failures become
 // recorded outcomes; only a setup error (reading the converted doc, classifying)
 // is returned as fatal.
-func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB agent.ToolBox, adHocTB *agent.MCPToolBox, root string, raw []byte, q Question, opts Options) (QuestionResult, error) {
-	hdfDoc, err := os.ReadFile(filepath.Join(root, q.HDFName))
-	if err != nil {
-		return QuestionResult{}, fmt.Errorf("read converted %s: %w", q.HDFName, err)
+func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB agent.ToolBox, adHocTB *agent.MCPToolBox, root string, rawBytes map[string][]byte, q Question, opts Options) (QuestionResult, error) {
+	rawDocs := make([][]byte, 0, len(q.Sources))
+	hdfDocs := make([][]byte, 0, len(q.Sources))
+	for _, src := range q.Sources {
+		rawDocs = append(rawDocs, rawBytes[src.Fixture])
+		b, err := os.ReadFile(filepath.Join(root, src.HDFName))
+		if err != nil {
+			return QuestionResult{}, fmt.Errorf("read converted %s: %w", src.HDFName, err)
+		}
+		hdfDocs = append(hdfDocs, b)
 	}
-	cls, err := truth.Classify(q.Truth, raw, hdfDoc)
+	cls, err := truth.Classify(q.Truth, rawDocs, hdfDocs)
 	if err != nil {
 		return QuestionResult{}, err
 	}
 
 	qr := QuestionResult{ID: q.ID, Ask: q.Ask, Class: cls.Class, RawView: cls.RawAnswer, HDFView: cls.HDFAnswer}
 	qr.Raw = runArm(ctx, inst, rawTB, ArmRaw, opts,
-		q.Ask+" The scan file is named "+q.Fixture+".",
-		q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw), q.Kind)
+		q.Ask+" "+fileClause("scan file", q.rawNames()),
+		q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw), q.Kind, q.ID+".raw")
 	hdfKey := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmHDF)
 	qr.HDF = runArm(ctx, inst, mcpTB, ArmHDF, opts,
-		q.Ask+" The HDF document is named "+q.HDFName+".", hdfKey, q.Kind)
+		q.Ask+" "+fileClause("HDF document", q.hdfNames()), hdfKey, q.Kind, q.ID+".hdf")
 
 	if adHocTB != nil {
 		// A per-question output name keeps concurrent ad-hoc conversions from
 		// colliding in the shared root. The raw file is already staged.
 		out := q.ID + ".adhoc.hdf.json"
+		p := q.Primary()
 		ah := runArm(ctx, inst, adHocTB, ArmHDF, opts,
 			fmt.Sprintf("%s The raw scan file is named %s. First convert it to HDF using hdf_convert with from=%s and output=%s, then analyze that HDF document.",
-				q.Ask, q.Fixture, q.From, out), hdfKey, q.Kind)
+				q.Ask, p.Fixture, p.From, out), hdfKey, q.Kind, q.ID+".adhoc")
 		qr.HDFAdHoc = &ah
 	}
 	return qr, nil
+}
+
+// fileClause names the documents an arm may read, singular or plural, so a
+// cross-document question tells the model about every file it needs rather than
+// only the first.
+func fileClause(noun string, names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return "The " + noun + " is named " + names[0] + "."
+	default:
+		return "The " + noun + "s are named " + strings.Join(names[:len(names)-1], ", ") +
+			" and " + names[len(names)-1] + "."
+	}
 }
 
 // runArm runs one agent arm opts.Repeat times and aggregates: the modal verdict
 // and answer, the count graded Correct, answer agreement (consistency), mean cost,
 // and token stddev. An error (including a timeout) is a Failed sample with whatever
 // tokens were spent — never propagated, so one over-context arm can't sink the run.
-func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind) ArmResult {
+// label names the transcript files ("<questionID>.<raw|hdf|adhoc>").
+func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, arm Arm, opts Options, prompt string, key truth.Answer, kind Kind, label string) ArmResult {
 	n := opts.repeat()
 	agg := ArmResult{Arm: arm, Scored: key.Answerable, Samples: n}
 	verdicts := map[Verdict]int{}
@@ -216,6 +263,11 @@ func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, a
 			v = Failed
 			if agg.Err == "" {
 				agg.Err = err.Error()
+			}
+		}
+		if opts.TranscriptDir != "" {
+			if werr := writeTranscript(opts.TranscriptDir, inst.Name(), label, i, arm, opts.system(), prompt, tb.Definitions(), res, v, err); werr != nil && agg.Err == "" {
+				agg.Err = "transcript: " + werr.Error()
 			}
 		}
 		verdicts[v]++
@@ -284,28 +336,64 @@ func stddev(xs []int) float64 {
 	return math.Sqrt(sq / float64(len(xs)))
 }
 
-// stageAndConvert copies each referenced raw fixture under root and normalizes it
-// to HDF via the MCP hdf_convert tool. It returns the raw bytes by filename. Runs
-// once, serially, before the concurrent phase.
-func stageAndConvert(ctx context.Context, sess *mcpclient.Session, fixturesDir, root string, bank []Question) (map[string][]byte, error) {
+// stageAndConvert copies each referenced raw fixture under root and normalizes it,
+// returning the raw bytes by filename. Runs once, serially, before the concurrent
+// phase.
+//
+// The conversion is overwrite:true because a multi-model invocation may share one
+// root across models, so a later model would otherwise hit OUTPUT_EXISTS on
+// artifacts an earlier one wrote. The staged inputs depend on the fixtures, not
+// the model, so rewriting them is idempotent.
+//
+// Sources are deduplicated by fixture name: cross-document questions share
+// fixtures with single-document ones (grype.json is read by five questions), and
+// converting it once per question would be wasted work.
+func stageAndConvert(ctx context.Context, sess *mcpclient.Session, bin, fixturesDir, root string, bank []Question) (map[string][]byte, error) {
 	raw := map[string][]byte{}
 	for _, q := range bank {
-		if _, done := raw[q.Fixture]; done {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(fixturesDir, q.Fixture))
-		if err != nil {
-			return nil, fmt.Errorf("read fixture %s: %w", q.Fixture, err)
-		}
-		if err := os.WriteFile(filepath.Join(root, q.Fixture), b, 0o600); err != nil {
-			return nil, fmt.Errorf("stage fixture %s: %w", q.Fixture, err)
-		}
-		raw[q.Fixture] = b
-		if _, err := sess.Call(ctx, "hdf_convert", map[string]any{
-			"source": map[string]any{"path": q.Fixture}, "from": q.From, "output": q.HDFName,
-		}); err != nil {
-			return nil, fmt.Errorf("normalize %s: %w", q.Fixture, err)
+		for _, src := range q.Sources {
+			if _, done := raw[src.Fixture]; done {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(fixturesDir, src.Fixture))
+			if err != nil {
+				return nil, fmt.Errorf("read fixture %s: %w", src.Fixture, err)
+			}
+			if err := os.WriteFile(filepath.Join(root, src.Fixture), b, 0o600); err != nil {
+				return nil, fmt.Errorf("stage fixture %s: %w", src.Fixture, err)
+			}
+			raw[src.Fixture] = b
+			if err := normalize(ctx, sess, bin, root, src); err != nil {
+				return nil, fmt.Errorf("normalize %s: %w", src.Fixture, err)
+			}
 		}
 	}
 	return raw, nil
+}
+
+// normalize turns one staged raw fixture into its HDF document, either through
+// the hdf_convert MCP tool or — for the formats that are not an hdf_convert path,
+// such as SPDX becoming an HDF System document — through the shipped hdf CLI.
+func normalize(ctx context.Context, sess *mcpclient.Session, bin, root string, src Source) error {
+	if len(src.CLIPrep) > 0 {
+		if bin == "" {
+			return fmt.Errorf("%s needs the hdf CLI but no binary path was supplied", src.Fixture)
+		}
+		args := make([]string, 0, len(src.CLIPrep))
+		for _, a := range src.CLIPrep {
+			a = strings.ReplaceAll(a, "{raw}", filepath.Join(root, src.Fixture))
+			a = strings.ReplaceAll(a, "{hdf}", filepath.Join(root, src.HDFName))
+			args = append(args, a)
+		}
+		cmd := exec.CommandContext(ctx, bin, args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("hdf %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	_, err := sess.Call(ctx, "hdf_convert", map[string]any{
+		"source": map[string]any{"path": src.Fixture}, "from": src.From, "output": src.HDFName,
+		"overwrite": true,
+	})
+	return err
 }

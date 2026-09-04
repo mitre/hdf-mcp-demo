@@ -40,7 +40,7 @@ func TestRawParsers(t *testing.T) {
 	if a, _ := GosecRulePresent("G999")(gosec); a.Value != "false" {
 		t.Errorf("GosecRulePresent(G999) = %+v; want false", a)
 	}
-	if a, _ := AlwaysUnanswerable(gosec); a.Answerable {
+	if a, _ := AlwaysUnanswerable([][]byte{gosec}); a.Answerable {
 		t.Errorf("gosec compliance rate should be unanswerable, got %+v", a)
 	}
 
@@ -141,7 +141,7 @@ func TestClassify_GosecPins(t *testing.T) {
 			if !ok {
 				t.Fatalf("question %s not in Bank()", tc.id)
 			}
-			got, err := Classify(c.Question, raw, hdf)
+			got, err := Classify(c.Question, [][]byte{raw}, [][]byte{hdf})
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}
@@ -158,5 +158,179 @@ func TestClassify_GosecPins(t *testing.T) {
 				t.Errorf("hdf answer = %q, want %q", got.HDFAnswer.Value, tc.wantHDF)
 			}
 		})
+	}
+}
+
+// TestInspecTruth pins the InSpec raw-view answers against the real fixture, and
+// — the part that matters — asserts they agree with the HDF view after
+// conversion. If a future converter change made InSpec normalization lossy, these
+// questions would silently stop being Class A and the study would start grading
+// two arms against different keys.
+func TestInspecTruth(t *testing.T) {
+	raw, err := os.ReadFile("../../fixtures/inspec.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		fn   func([]byte) (Answer, error)
+		want string
+	}{
+		{"control count", InspecControlCount, "192"},
+		{"compliance rate", InspecComplianceRate, "80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.fn(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Answerable || got.Value != tc.want {
+				t.Errorf("got %+v, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCrossFormatTruth pins the cross-format aggregate — HDF's core Heimdall use
+// case: three UNLIKE severity vocabularies (gosec HIGH/MEDIUM/LOW, ZAP numeric
+// riskcodes, grype Critical..Unknown) asked one question. The raw view must sum
+// per-format high-or-above counts over the real fixtures: gosec 0 (all MEDIUM) +
+// zap 3 (riskcode 3) + grype 57 (13 Critical + 44 High) = 60.
+func TestCrossFormatTruth(t *testing.T) {
+	docs := make([][]byte, 0, 3)
+	for _, f := range []string{"gosec.json", "zap.json", "grype.json"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "fixtures", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, b)
+	}
+	got, err := CrossFormatHighSeverityCount(docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Answerable || got.Value != "60" {
+		t.Errorf("raw cross-format high-or-above = %+v, want 60", got)
+	}
+	if _, err := CrossFormatHighSeverityCount(docs[:2]); err == nil {
+		t.Error("want error when a source document is missing")
+	}
+}
+
+// TestHDFImpactTotalAtLeast exercises the multi-document HDF view: the sum of
+// impact>=min counts across several converted documents.
+func TestHDFImpactTotalAtLeast(t *testing.T) {
+	docA := []byte(`{"baselines":[{"requirements":[{"id":"a","impact":0.9},{"id":"b","impact":0.5}]}]}`)
+	docB := []byte(`{"baselines":[{"requirements":[{"id":"c","impact":0.7}]}]}`)
+	got, err := HDFImpactTotalAtLeast(0.7)([][]byte{docA, docB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "2" {
+		t.Errorf("HDFImpactTotalAtLeast(0.7) = %+v, want 2", got)
+	}
+}
+
+// TestTemporalDiffTruth pins the raw view of the temporal-diff question over the
+// real paired fixtures (grype of alpine:3.11 vs alpine:3.12, same grype version
+// and DB): 5 distinct vulnerability IDs from the previous scan are gone in the
+// current one. Distinct-ID level is deliberate — grype emits one match per
+// package instance, so instance-level diffs report churn for CVEs that persist.
+func TestTemporalDiffTruth(t *testing.T) {
+	prev, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "grype-alpine311.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	curr, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "grype-alpine312.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GrypeDistinctFixedCount([][]byte{prev, curr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Answerable || got.Value != "5" {
+		t.Errorf("distinct fixed = %+v, want 5", got)
+	}
+	if _, err := GrypeDistinctFixedCount([][]byte{prev}); err == nil {
+		t.Error("want error when a scan is missing")
+	}
+}
+
+// TestJoinTruth pins the raw view of the SBOM join over the real pair (syft SBOM
+// of the SAME image grype scanned): 15 SBOM packages, 7 with vulnerability
+// matches, so 8 are vulnerability-free. Sources arrive grype-first.
+func TestJoinTruth(t *testing.T) {
+	grype, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "grype-alpine312.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sbom, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "spdx-alpine312.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := SBOMVulnFreePackageCount([][]byte{grype, sbom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Answerable || got.Value != "8" {
+		t.Errorf("vuln-free packages = %+v, want 8", got)
+	}
+	if _, err := SBOMVulnFreePackageCount([][]byte{grype}); err == nil {
+		t.Error("want error when the SBOM is missing")
+	}
+}
+
+// TestHDFVulnFreePackages exercises both branches of the HDF join view on
+// hand-built documents: a system doc that embeds its BOM inventory answers (the
+// forward path a future converter activates), and today's reference-only shape
+// is unanswerable — which is what makes the live question Class D.
+func TestHDFVulnFreePackages(t *testing.T) {
+	results := []byte(`{"baselines":[{"requirements":[
+		{"id":"Grype/CVE-1","code":"{\"artifact\":{\"name\":\"musl\"}}"},
+		{"id":"Grype/CVE-2","code":"{\"artifact\":{\"name\":\"zlib\"}}"}
+	]}]}`)
+	embedded := []byte(`{"components":[{"boms":[{"document":{"packages":[
+		{"name":"musl"},{"name":"zlib"},{"name":"busybox"},{"name":"ssl_client"}
+	]}}]}]}`)
+	got, err := HDFVulnFreePackageCount([][]byte{results, embedded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Answerable || got.Value != "2" {
+		t.Errorf("embedded-BOM join = %+v, want 2 (busybox, ssl_client)", got)
+	}
+
+	refOnly := []byte(`{"components":[{"boms":[{"bomType":"sbom","format":"spdx","ref":"spdx.json"}]}]}`)
+	got, err = HDFVulnFreePackageCount([][]byte{results, refOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Answerable {
+		t.Errorf("reference-only BOM should be unanswerable, got %+v", got)
+	}
+	if _, err := HDFVulnFreePackageCount([][]byte{results}); err == nil {
+		t.Error("want error when the system document is missing")
+	}
+	if _, err := HDFDistinctFixedCount([][]byte{results}); err == nil {
+		t.Error("want error when the diff's second document is missing")
+	}
+}
+
+// TestGrypeRelatedVulns pins the category-5 pair. The two views must AGREE (45):
+// conversion keeps the field, so this is Class A and the HDF arm is graded on it
+// rather than excused. If a converter change ever did drop the field, this test
+// fails loudly instead of the question silently reclassifying.
+func TestGrypeRelatedVulns(t *testing.T) {
+	raw, err := os.ReadFile("../../fixtures/grype.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := GrypeRelatedVulnCount(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Value != "45" {
+		t.Errorf("raw related-vuln count = %q, want 45", got.Value)
 	}
 }

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
@@ -49,16 +52,31 @@ func (b *RawFileToolBox) Definitions() []instrument.Tool {
 			},
 		},
 		{
-			Name:        "search_file",
-			Description: "Search a file for lines containing a substring. Returns the total match count and the first matching lines (with line numbers).",
+			Name: "search_file",
+			Description: "Search a file for a substring or regular expression. Returns the TOTAL number of matches " +
+				"(not matching lines — a minified file puts every match on one line) and a window of text around each hit.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":        strProp("the file name"),
-					"query":       strProp("substring to search for"),
-					"max_results": intProp("max matching lines to return (default 20)"),
+					"query":       strProp("substring, or a regular expression when regex is true"),
+					"regex":       map[string]any{"type": "boolean", "description": "treat query as a regular expression"},
+					"max_results": intProp("max matches to show (default 20)"),
 				},
 				"required": []string{"name", "query"},
+			},
+		},
+		{
+			Name: "json_select",
+			Description: "Read a value out of a JSON file by dot path (e.g. \"vulnerabilities\" or \"runs.0.results\"). " +
+				"Reports the type, the element count for arrays and objects, and a bounded preview — the reliable way to count entries.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": strProp("the file name"),
+					"path": strProp("dot path; empty or \".\" selects the document root"),
+				},
+				"required": []string{"name"},
 			},
 		},
 		{
@@ -83,6 +101,8 @@ func (b *RawFileToolBox) Execute(_ context.Context, name string, args json.RawMe
 		Name       string `json:"name"`
 		Query      string `json:"query"`
 		MaxResults int    `json:"max_results"`
+		Regex      bool   `json:"regex"`
+		Path       string `json:"path"`
 		Offset     int    `json:"offset"`
 		Limit      int    `json:"limit"`
 	}
@@ -108,7 +128,9 @@ func (b *RawFileToolBox) Execute(_ context.Context, name string, args json.RawMe
 		}
 		return string(data), nil
 	case "search_file":
-		return searchFile(string(data), a.Query, a.MaxResults), nil
+		return searchFile(string(data), a.Query, a.MaxResults, a.Regex)
+	case "json_select":
+		return jsonSelect(data, a.Path), nil
 	case "read_lines":
 		return readLines(string(data), a.Offset, a.Limit), nil
 	default:
@@ -127,30 +149,167 @@ func (b *RawFileToolBox) read(name string) ([]byte, error) {
 
 const maxLineLen = 300 // truncate long lines so a match/window stays bounded
 
-func searchFile(content, query string, maxResults int) string {
+// matchWindow is how much text is returned around each hit. It replaces the old
+// fixed 300-character line clip, which silently truncated every study fixture
+// but one — nessus.xml's longest line is 893,248 characters, so a line-based
+// view of it showed the model 0.03% of the line and gave no hint of the rest.
+const matchWindow = 48
+
+// maxSearchBytes bounds the whole response. Strengthening this arm must not turn
+// it into "return the file", which would rebuild the whole-file strawman the
+// study exists to avoid.
+// maxSearchBytes bounds the whole response. It is deliberately tight: a tool
+// response is re-sent on every subsequent turn, so verbosity compounds. An
+// earlier 20,000-byte cap with 120-character windows raised the raw arm's token
+// cost 74% and pushed it into the iteration cap more often — richer tools made
+// the agent worse. The COUNT is the valuable part of a search; the windows are
+// only there to confirm the pattern matched what the caller meant.
+const maxSearchBytes = 3000
+
+// searchFile counts MATCHES, not matching lines, and returns a window of text
+// around each. Counting lines answered 1 where a minified document held four
+// findings; counting matches is what "how many findings" actually needs.
+func searchFile(content, query string, maxResults int, useRegex bool) (string, error) {
 	if query == "" {
-		return "search_file requires a non-empty query"
+		return "search_file requires a non-empty query", nil
 	}
 	if maxResults <= 0 {
-		maxResults = 20
-	} else if maxResults > 100 {
-		maxResults = 100
+		maxResults = 5
+	} else if maxResults > 50 {
+		maxResults = 50
 	}
-	var hits []string
-	total := 0
-	for i, line := range strings.Split(content, "\n") {
-		if strings.Contains(line, query) {
-			total++
-			if len(hits) < maxResults {
-				hits = append(hits, fmt.Sprintf("L%d: %s", i+1, clip(strings.TrimSpace(line))))
+
+	var re *regexp.Regexp
+	var err error
+	if useRegex {
+		if re, err = regexp.Compile(query); err != nil {
+			return "", fmt.Errorf("invalid regular expression %q: %w", query, err)
+		}
+	} else {
+		re = regexp.MustCompile(regexp.QuoteMeta(query))
+	}
+
+	locs := re.FindAllStringIndex(content, -1)
+	if len(locs) == 0 {
+		return fmt.Sprintf("0 matches for %q", query), nil
+	}
+
+	// Line numbers stay useful for line-structured files; they are computed from
+	// the match offset so they remain correct on minified input too.
+	lineOf := func(off int) int { return strings.Count(content[:off], "\n") + 1 }
+
+	var b strings.Builder
+	shown := 0
+	fmt.Fprintf(&b, "%d matches for %q (showing first %d):\n", len(locs), query, min(len(locs), maxResults))
+	for _, loc := range locs {
+		if shown >= maxResults || b.Len() > maxSearchBytes {
+			break
+		}
+		// Clamp the window to the matched line, so a line-structured file reads
+		// like grep. Only when the line itself is longer than the window (the
+		// minified case, where a "line" can be hundreds of thousands of
+		// characters) does the window become the limit.
+		lineLo := strings.LastIndexByte(content[:loc[0]], '\n') + 1
+		lineHi := loc[1]
+		if nl := strings.IndexByte(content[loc[1]:], '\n'); nl >= 0 {
+			lineHi = loc[1] + nl
+		} else {
+			lineHi = len(content)
+		}
+		lo := max(lineLo, loc[0]-matchWindow)
+		hi := min(lineHi, loc[1]+matchWindow)
+		snippet := strings.ReplaceAll(strings.TrimSpace(content[lo:hi]), "\n", " ")
+		prefix, suffix := "", ""
+		if lo > lineLo {
+			prefix = "…"
+		}
+		if hi < lineHi {
+			suffix = "…"
+		}
+		fmt.Fprintf(&b, "L%d: %s%s%s\n", lineOf(loc[0]), prefix, snippet, suffix)
+		shown++
+	}
+	if len(locs) > shown {
+		fmt.Fprintf(&b, "(%d further matches not shown; the count above is complete)\n", len(locs)-shown)
+	}
+	return b.String(), nil
+}
+
+// jsonSelect reads a value by dot path and reports its type and size. It is the
+// structured extraction a real agent gets from jq: counting the elements of an
+// array is exact here, where text heuristics miscount.
+func jsonSelect(data []byte, path string) string {
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fmt.Sprintf("not valid JSON: %v", err)
+	}
+	cur := doc
+	if p := strings.Trim(path, ". "); p != "" {
+		for _, seg := range strings.Split(p, ".") {
+			switch node := cur.(type) {
+			case map[string]any:
+				v, ok := node[seg]
+				if !ok {
+					return fmt.Sprintf("path %q: no key %q (available: %s)", path, seg, strings.Join(keysOf(node), ", "))
+				}
+				cur = v
+			case []any:
+				i, err := strconv.Atoi(seg)
+				if err != nil || i < 0 || i >= len(node) {
+					return fmt.Sprintf("path %q: %q is not a valid index into an array of %d", path, seg, len(node))
+				}
+				cur = node[i]
+			default:
+				return fmt.Sprintf("path %q: cannot descend into %T", path, cur)
 			}
 		}
 	}
-	if total == 0 {
-		return fmt.Sprintf("0 lines contain %q", query)
+
+	switch node := cur.(type) {
+	case []any:
+		return fmt.Sprintf("array with %d elements at %q\n%s", len(node), pathLabel(path), preview(node))
+	case map[string]any:
+		return fmt.Sprintf("object with %d keys at %q: %s\n%s",
+			len(node), pathLabel(path), strings.Join(keysOf(node), ", "), preview(node))
+	default:
+		return fmt.Sprintf("%T at %q: %s", cur, pathLabel(path), clipTo(fmt.Sprint(cur), 200))
 	}
-	shown := len(hits)
-	return fmt.Sprintf("%d lines contain %q (showing first %d):\n%s", total, query, shown, strings.Join(hits, "\n"))
+}
+
+func pathLabel(p string) string {
+	if strings.Trim(p, ". ") == "" {
+		return "."
+	}
+	return p
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	if len(out) > 20 {
+		out = append(out[:20], "…")
+	}
+	return out
+}
+
+// preview renders a bounded sample so a caller can see the shape without
+// receiving the document.
+func preview(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return "preview: " + clipTo(string(b), 300)
+}
+
+func clipTo(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func readLines(content string, offset, limit int) string {

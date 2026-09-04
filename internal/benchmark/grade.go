@@ -41,13 +41,30 @@ var (
 	abstainRE    = regexp.MustCompile(`(?i)\b(cannot|can't|can not|unable|not able|no\b.*\b(data|info|information|way)|not (?:enough|sufficient)|don't know|do not know|unknown|indeterminate|n/?a)\b`)
 )
 
-// finalAnswer returns the text after the last "ANSWER:" marker, or "" if none.
+// finalAnswer returns the value of the last "ANSWER:" marker, or "" if none.
+//
+// The value is taken up to the first commentary separator. The prompt asks for
+// "ANSWER: <value>" and models routinely append a justification — or echo the
+// prompt's own format template, which contains the words "yes/no" and so
+// contributed a spurious negative that outvoted the answer actually given.
+// Reading the value rather than the whole line makes the parse depend on what
+// the model answered, not on what it said afterwards.
 func finalAnswer(reply string) string {
 	ms := answerLineRE.FindAllStringSubmatch(reply, -1)
 	if len(ms) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(ms[len(ms)-1][1])
+	return answerValue(ms[len(ms)-1][1])
+}
+
+// answerValue trims trailing commentary from an answer line.
+func answerValue(s string) string {
+	for _, sep := range []string{"—", "–", " - ", "\n", ";", ","} {
+		if i := strings.Index(s, sep); i >= 0 {
+			s = s[:i]
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 // Grade reduces reply to a value per kind and compares it to key. When key is
@@ -65,6 +82,14 @@ func Grade(reply string, key truth.Answer, kind Kind) Verdict {
 	case KindBool:
 		got, ok := parseBool(scope)
 		if !ok {
+			return Abstained
+		}
+		// A boolean read out of the whole reply (no ANSWER line) is weak evidence,
+		// exactly as for counts: when the text is hedging or reporting an inability,
+		// the model declined rather than answered. Recording that as Wrong invents a
+		// confident answer it never gave — and reads downstream as a capability
+		// failure when the usual cause is a tool call that did not work.
+		if whole && abstainRE.MatchString(reply) {
 			return Abstained
 		}
 		if !key.Answerable {
@@ -107,13 +132,40 @@ func firstInt(s string) (string, bool) {
 // parseBool maps common affirmative/negative phrasings to a boolean. Negations
 // are tested first so "not present"/"not found" don't match the affirmative
 // "present"/"found".
+// parseBool reduces a reply to a boolean. It reports ok=false when the text
+// carries no signal OR carries both — an ambiguous reply is not an answer, and
+// silently resolving it to the first match found (which was always the negative)
+// credits the model with a position it did not take.
 func parseBool(s string) (bool, bool) {
 	l := strings.ToLower(s)
+
+	// Negated phrasings embed their own positive word ("not present" contains
+	// "present"), so consume them first and search what remains for affirmations.
+	neg := false
+	for _, p := range []string{"not present", "not found", "not detected", "isn't", "is not"} {
+		if strings.Contains(l, p) {
+			neg = true
+			l = strings.ReplaceAll(l, p, " ")
+		}
+	}
+	for _, w := range []string{"no", "false", "absent"} {
+		if containsWord(l, w) {
+			neg = true
+		}
+	}
+	pos := false
+	for _, w := range []string{"yes", "true", "present", "found"} {
+		if containsWord(l, w) {
+			pos = true
+		}
+	}
+
 	switch {
-	case containsWord(l, "no"), containsWord(l, "false"), containsWord(l, "absent"),
-		strings.Contains(l, "not present"), strings.Contains(l, "not found"), strings.Contains(l, "isn't"), strings.Contains(l, "is not"):
+	case neg && pos:
+		return false, false // contradictory — not an answer
+	case neg:
 		return false, true
-	case containsWord(l, "yes"), containsWord(l, "true"), containsWord(l, "present"), containsWord(l, "found"):
+	case pos:
 		return true, true
 	}
 	return false, false

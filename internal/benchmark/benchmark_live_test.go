@@ -51,12 +51,12 @@ func TestBenchmark_Live(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 			defer cancel()
 
-			results, err := Run(ctx, inst, sess, "../../fixtures", root, bank, Options{MaxIters: 6})
+			results, err := Run(ctx, inst, sess, bin, "../../fixtures", root, bank, Options{MaxIters: 6})
 			if err != nil {
 				t.Fatalf("run: %v", err)
 			}
 			SortByID(results)
-			t.Logf("\n%s", Render(inst.Name(), results, false))
+			t.Logf("\n%s", Render(inst.Name(), results, false, nil))
 
 			if len(results) != len(bank) {
 				t.Fatalf("got %d results, want %d", len(results), len(bank))
