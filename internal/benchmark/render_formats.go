@@ -407,7 +407,7 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 		for _, r := range run.Results {
 			row := fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %.1f | %.1f |",
 				r.ID, typeLabel(r.Class), r.Raw.Verdict, r.HDF.Verdict, tokensWithSpread(r.Raw), tokensWithSpread(r.HDF),
-				ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
+				costMultiplier(r),
 				r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 			if len(bks) > 0 {
 				vc, vo := questionBookendRatios(r, bkByID)

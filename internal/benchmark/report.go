@@ -37,7 +37,7 @@ func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) s
 		line := fmt.Sprintf("%-22s %-13s %-13s %-13s %12s %12s %7s %7.1f %7.1f",
 			trunc(r.ID, 22), typeLabel(r.Class), string(r.Raw.Verdict), string(r.HDF.Verdict),
 			tokensWithSpread(r.Raw), tokensWithSpread(r.HDF),
-			ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens()),
+			costMultiplier(r),
 			r.Raw.Cost.Elapsed.Seconds(), r.HDF.Cost.Elapsed.Seconds())
 		if len(bks) > 0 {
 			vc, vo := questionBookendRatios(r, bkByID)
@@ -294,6 +294,26 @@ func totals(rs []QuestionResult) (raw, hdf, adhoc int) {
 		}
 	}
 	return
+}
+
+// costMultiplier is hdfTok/rawTok, shown only when BOTH arms produced an answer.
+//
+// A ratio between an arm that answered and one that gave up measures nothing.
+// It is not even conservatively wrong: in this study a failed arm averaged 7,955
+// tokens against 4,552 for a correct one, because failure burns the whole
+// iteration budget — so a mismatched pair can make either side look efficient
+// depending on which one quit. Printing "—" says that plainly.
+func costMultiplier(r QuestionResult) string {
+	if !answered(r.Raw.Verdict) || !answered(r.HDF.Verdict) {
+		return "—"
+	}
+	return ratio(r.HDF.Cost.TotalTokens(), r.Raw.Cost.TotalTokens())
+}
+
+// answered reports whether an arm produced an answer at all — correct, wrong, or
+// out-of-remit-but-asserted. Abstaining and failing are both "no answer".
+func answered(v Verdict) bool {
+	return v == Correct || v == Wrong || v == Hallucinated
 }
 
 // tokensWithSpread renders an arm's mean token cost, carrying the spread across

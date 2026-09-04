@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -249,14 +250,22 @@ func TestPerQuestionMultiplier(t *testing.T) {
 		t.Errorf("json hdfVsRaw = %v, want ~1.93", r)
 	}
 
-	// Zero-raw (failed-before-usage) row: n/a, never Inf/NaN.
+	// Both-failed row: the multiplier is suppressed as an outcome mismatch before
+	// the zero-denominator case can arise, so it renders "—" rather than "n/a".
+	// Either way it must never be Inf or NaN.
 	zero := []ModelRun{{Model: "z", Results: []QuestionResult{{
 		ID: "q", Class: truth.ClassA, RawView: truth.Answered("1"), HDFView: truth.Answered("1"),
 		Raw: ArmResult{Arm: ArmRaw, Verdict: Failed, Scored: true, Samples: 1},
 		HDF: ArmResult{Arm: ArmHDF, Verdict: Failed, Scored: true, Samples: 1},
 	}}}}
-	if got := RenderMarkdown(RunMeta{Models: []string{"z"}}, zero, false, nil); !strings.Contains(got, "| n/a |") {
-		t.Errorf("zero-raw row should render n/a:\n%s", got)
+	got2 := RenderMarkdown(RunMeta{Models: []string{"z"}}, zero, false, nil)
+	if !strings.Contains(got2, "| — |") {
+		t.Errorf("both-failed row should suppress the multiplier:\n%s", got2)
+	}
+	for _, bad := range []string{"Inf", "NaN"} {
+		if strings.Contains(got2, bad) {
+			t.Errorf("row rendered %s:\n%s", bad, got2)
+		}
 	}
 }
 
@@ -365,5 +374,59 @@ func TestFooterPointsAtDocsRatherThanEmbedding(t *testing.T) {
 		if strings.Contains(md, inlined) {
 			t.Errorf("report still embeds the notes prose (%q) instead of referencing it:\n%s", inlined, md)
 		}
+	}
+}
+
+// TestMultSuppressedWhenAnArmDidNotAnswer pins that the cost multiplier is only
+// shown when both arms produced an answer. Comparing an arm's cost-to-answer
+// against the other's cost-to-give-up measures nothing: in this study failed arms
+// averaged 7,955 tokens against 4,552 for correct ones, because a failure burns
+// the whole iteration budget. A ratio across mismatched outcomes reads as a cost
+// finding and is an artefact.
+func TestMultSuppressedWhenAnArmDidNotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		raw, hdf Verdict
+		wantMult bool
+	}{
+		{"both correct", Correct, Correct, true},
+		{"both answered, one wrong", Correct, Wrong, true},
+		{"raw failed", Failed, Correct, false},
+		{"hdf failed", Correct, Failed, false},
+		{"both failed", Failed, Failed, false},
+		{"hdf abstained", Correct, Abstained, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runs := sampleRuns()
+			runs[0].Results = runs[0].Results[:1]
+			runs[0].Results[0].Raw.Verdict = tc.raw
+			runs[0].Results[0].HDF.Verdict = tc.hdf
+
+			id := runs[0].Results[0].ID
+			txt := Render(runs[0].Model, runs[0].Results, false, nil)
+			md := RenderMarkdown(RunMeta{Models: []string{"m"}}, runs, false, nil)
+			for name, got := range map[string]string{"text": txt, "markdown": md} {
+				// Scope to the question's OWN row: the report carries other
+				// ratios (per-arm cost summaries) that are not this column.
+				row := ""
+				for _, line := range strings.Split(got, "\n") {
+					if strings.Contains(line, id) {
+						row = line
+						break
+					}
+				}
+				if row == "" {
+					t.Fatalf("%s report has no row for %s:\n%s", name, id, got)
+				}
+				hasMult := regexp.MustCompile(`\d\.\d+x`).MatchString(row)
+				if hasMult != tc.wantMult {
+					verb := "omit"
+					if tc.wantMult {
+						verb = "show"
+					}
+					t.Errorf("%s report should %s a multiplier for raw=%s hdf=%s, row was: %s", name, verb, tc.raw, tc.hdf, row)
+				}
+			}
+		})
 	}
 }
