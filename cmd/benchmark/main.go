@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mitre/hdf-mcp-demo/internal/agent"
 	"github.com/mitre/hdf-mcp-demo/internal/aibom"
 	"github.com/mitre/hdf-mcp-demo/internal/benchmark"
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
@@ -53,6 +54,7 @@ func main() {
 	repeat := flag.Int("repeat", 1, "runs per question per arm; >1 reports accuracy as a rate and cost as mean±stddev")
 	temperature := flag.Float64("temperature", 0, "sampling temperature (0 = deterministic); negative to omit it entirely for models that reject it")
 	provider := flag.String("provider", "openai", "model provider: openai (OpenAI-compatible /v1 — LiteLLM, vLLM, Ollama's /v1 shim) | ollama (native /api/chat, fully local)")
+	toolset := flag.String("tools", "", "comma-separated HDF tools the arm may advertise (default: the full read surface). Use to measure whether surface size affects tool selection — see hdf-libs-uqhe.18")
 	numCtx := flag.Int("numctx", 32768, "ollama only: context window (num_ctx). Ollama's own default is 4096 whatever the model advertises, and it truncates silently — too small for the raw-file arm, so leaving it unset understates raw. 0 = defer to the server")
 	bookendsOnly := flag.Bool("bookends", false, "compute only the model-free token bookends (whole-file ceiling + hand-optimal oracle per question) and exit — needs no model, endpoint, or provider")
 	transcripts := flag.String("transcripts", "", "write one JSON transcript per (question, arm, sample) under this directory — every prompt, tool definition, tool call, and the graded outcome — for diagnosing a failing or abstaining arm from evidence")
@@ -64,6 +66,7 @@ func main() {
 		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
 		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider), numCtx: *numCtx,
 		bookendsOnly: *bookendsOnly, transcripts: *transcripts,
+		toolset: splitModels(*toolset),
 	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = defaultConcurrency(cfg.provider)
@@ -91,6 +94,7 @@ type runConfig struct {
 	numCtx            int
 	bookendsOnly      bool
 	transcripts       string
+	toolset           []string // advertised HDF tools; empty = the full read surface
 }
 
 // endpoint resolves the provider's base URL. For ollama it is optional (the
@@ -180,6 +184,20 @@ func writeModelBOMs(ctx context.Context, cfg runConfig, bin string, models []str
 		})
 	}
 	return written
+}
+
+// allowedTools is the HDF tool set the arm advertises. Empty means the full read
+// surface; a subset exists so the study can measure whether surface SIZE changes
+// which tool a model reaches for, not merely what it costs to advertise.
+func allowedTools(cfg runConfig) map[string]bool {
+	if len(cfg.toolset) == 0 {
+		return agent.ReadTools
+	}
+	allow := map[string]bool{}
+	for _, t := range cfg.toolset {
+		allow[t] = true
+	}
+	return allow
 }
 
 // metaNumCtx reports the context window to record in the run metadata. It is an
@@ -514,6 +532,7 @@ func runModel(ctx context.Context, cfg runConfig, bin, baseRoot, model string, i
 	}
 	defer func() { _ = sess.Close() }()
 
+	opts.Tools = allowedTools(cfg)
 	results, err := benchmark.Run(ctx, inst, sess, bin, cfg.fixturesDir, root, bank, opts)
 	if err != nil {
 		if tail := strings.TrimSpace(sess.ServerLog()); tail != "" {

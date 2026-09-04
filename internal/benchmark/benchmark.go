@@ -53,6 +53,9 @@ type Options struct {
 	// sample) under <dir>/<model>/ — the full conversation, tool definitions, and
 	// graded outcome — so a failing or abstaining arm is diagnosable from evidence.
 	TranscriptDir string
+	// Tools, when non-nil, restricts the HDF arm's advertised tool surface.
+	// nil means the full read surface.
+	Tools map[string]bool
 	// Progress, if set, is called once per question as it completes (serialized, so
 	// the callback need not be thread-safe) — for liveness during a long run.
 	Progress func(model, questionID string, done, total int)
@@ -138,7 +141,11 @@ func Run(ctx context.Context, inst instrument.Instrument, sess *mcpclient.Sessio
 	}
 
 	rawTB := agent.NewRawFileToolBox(root)
-	mcpTB, err := agent.NewMCPToolBox(ctx, sess, agent.ReadTools)
+	allow := opts.Tools
+	if allow == nil {
+		allow = agent.ReadTools
+	}
+	mcpTB, err := agent.NewMCPToolBox(ctx, sess, allow)
 	if err != nil {
 		return nil, fmt.Errorf("build hdf toolbox: %w", err)
 	}
