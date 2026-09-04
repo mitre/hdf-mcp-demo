@@ -437,6 +437,9 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 		rc, rn := scoredAccuracy(run.Results, ArmRaw)
 		hc, hn := scoredAccuracy(run.Results, ArmHDF)
 		fmt.Fprintf(&b, "| **ALL (scored)** | %s | %s |\n", frac(rc, rn), frac(hc, hn))
+		if cav := capCaveat(run.Results, meta.MaxIters); cav != "" {
+			fmt.Fprintf(&b, "\n> **%s**\n", cav)
+		}
 
 		if hall, abst, outOf := remit(run.Results, ArmRaw); outOf > 0 {
 			fmt.Fprintf(&b, "\n_Raw-file arm on hdf-only questions (out of remit, not scored): %d hallucinated / %d abstained of %d._\n",

@@ -12,7 +12,7 @@
 //	export OPENAI_API_KEY=<key>                        # if the gateway requires it
 //	export HDF_BIN=/path/to/hdf                        # or put hdf on PATH
 //	go run ./cmd/benchmark [-adhoc] [-concurrency 4] [-maxtokens 1024] \
-//	    [-models gemma-4] [-timeout 90m] [-model-timeout 25m] [-maxiters 6]
+//	    [-models gemma-4] [-timeout 90m] [-model-timeout 25m] [-maxiters 12]
 //
 // Fully local instead:
 //
@@ -42,7 +42,12 @@ import (
 func main() {
 	fixturesDir := flag.String("fixtures", "fixtures", "directory holding the raw source fixtures")
 	adhoc := flag.Bool("adhoc", false, "also measure the conversion-included (ad-hoc) HDF cost view")
-	maxIters := flag.Int("maxiters", 6, "tool round-trip cap per arm")
+	// 12, not 6: with a cap of 6 the first gateway study truncated 13 of 28
+	// raw-arm runs, and the runs that DID answer reached 5 — the distribution was
+	// cut off at the boundary rather than tapering, so the raw arm's accuracy
+	// measured its turn budget. The HDF arm answers in 1-4, so the higher cap
+	// costs it nothing; it buys the raw arm room to show where it actually stops.
+	maxIters := flag.Int("maxiters", 12, "tool round-trip cap per arm; an arm that hits it is reported as capped, and its accuracy is a lower bound")
 	maxTokens := flag.Int("maxtokens", 4096, "per-request completion-token cap. Reasoning models spend tokens on hidden reasoning before the answer, so a low cap truncates them into a false abstention")
 	concurrency := flag.Int("concurrency", 0, "max questions in flight at once per model; 0 = 4 for a batching gateway, 2 for local Ollama (each in-flight request needs its own KV cache, so a large local model can exhaust memory)")
 	modelsFlag := flag.String("models", "", "comma-separated models to run; overrides OPENAI_MODEL_LIST/OPENAI_MODEL when set")

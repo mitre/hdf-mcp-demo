@@ -14,11 +14,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 )
+
+// ErrIterationCap marks an arm that stopped because it ran out of tool round
+// trips, not because it could not answer. Reports must distinguish the two: a
+// capped arm's accuracy is a lower bound on its capability.
+var ErrIterationCap = errors.New("reached max iterations")
 
 // ToolBox is the set of tools an arm exposes to the model, and the executor for
 // calls the model makes.
@@ -85,5 +91,5 @@ func Run(ctx context.Context, inst instrument.Instrument, tb ToolBox, systemProm
 		}
 	}
 	res.Elapsed, res.Transcript = time.Since(start), msgs
-	return res, fmt.Errorf("reached max iterations (%d) without a final answer", maxIters)
+	return res, fmt.Errorf("%w (%d) without a final answer", ErrIterationCap, maxIters)
 }
