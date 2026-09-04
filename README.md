@@ -195,6 +195,21 @@ Leave headroom: the context window costs memory on top of the weights, and each 
 | `-adhoc` | Also measure the conversion-included cost view, rather than assuming documents are already normalized. |
 | `-transcripts` | Write one JSON transcript per question/arm/sample (every prompt, tool definition, tool call, and the graded outcome) into this directory — the evidence trail for diagnosing an arm that fails or abstains. |
 
+## Published runs
+
+The bookends table can be regenerated in CI by anyone with repo access:
+**Actions → bookends → Run workflow**. It is `workflow_dispatch` only — it is not
+part of push/PR CI, because it is a publicity and reproducibility job rather than
+a test.
+
+The job builds `hdf` from a **pinned** hdf-libs commit (recorded in the run
+summary) and computes the model-free bookends. It runs no model, so it costs
+nothing and finishes in seconds, and it commits nothing back to the repo.
+
+What it publishes is the **ceiling and the ideal**, not an agent-cost forecast —
+the summary says so, and the graded study remains the number to quote about what
+a model actually spends.
+
 ## Docs
 
 - [`docs/interpreting-results.md`](docs/interpreting-results.md) — how to read a benchmark report: what the question types mean, how answers are graded, the two cost views, the bookends, and what the numbers do not settle. Reports link here rather than restating it.
