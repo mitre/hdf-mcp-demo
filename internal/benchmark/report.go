@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"fmt"
+	"github.com/mitre/hdf-mcp-demo/internal/agent"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,6 +71,9 @@ func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) s
 	rc, rn := scoredAccuracy(results, ArmRaw)
 	hc, hn := scoredAccuracy(results, ArmHDF)
 	fmt.Fprintf(&b, "%-26s %-12s %-12s\n", "ALL (scored)", frac(rc, rn), frac(hc, hn))
+	if cav := capCaveat(results, 0); cav != "" {
+		fmt.Fprintf(&b, "\n! %s\n", cav)
+	}
 
 	// Out-of-remit behavior: on hdf-only questions the raw arm can't answer, did it
 	// correctly abstain or invent a plausible-but-wrong answer? (Informational — not
@@ -370,4 +374,36 @@ func trunc(s string, n int) string {
 // SortByID orders results deterministically for stable output.
 func SortByID(rs []QuestionResult) {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].ID < rs[j].ID })
+}
+
+// iterationCapped counts an arm's runs that stopped at the tool round-trip cap
+// rather than producing an answer. It matches agent.ErrIterationCap's text
+// because ArmResult carries the error as a string, so the sentinel stays the
+// single source of that wording.
+func iterationCapped(rs []QuestionResult, arm Arm) int {
+	n := 0
+	for _, r := range rs {
+		a := armOf(r, arm)
+		if a.Verdict == Failed && strings.HasPrefix(a.Err, agent.ErrIterationCap.Error()) {
+			n++
+		}
+	}
+	return n
+}
+
+// capCaveat is the one-line warning that must sit beside an accuracy figure when
+// the iteration cap bound the run. Without it the headline number reads as a
+// capability measure when it is really a turn-budget measure — the exact misread
+// the first live gateway run invited. Returns "" when no arm hit the cap.
+func capCaveat(rs []QuestionResult, maxIters int) string {
+	rc, hc := iterationCapped(rs, ArmRaw), iterationCapped(rs, ArmHDF)
+	if rc == 0 && hc == 0 {
+		return ""
+	}
+	cap := ""
+	if maxIters > 0 {
+		cap = fmt.Sprintf(" (maxiters=%d)", maxIters)
+	}
+	return fmt.Sprintf("iteration cap%s bound this run: raw %d, hdf %d runs stopped without answering — "+
+		"a capped arm's accuracy is a lower bound on its capability, not a measure of it.", cap, rc, hc)
 }

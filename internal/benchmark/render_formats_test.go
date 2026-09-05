@@ -430,3 +430,45 @@ func TestMultSuppressedWhenAnArmDidNotAnswer(t *testing.T) {
 		})
 	}
 }
+
+// TestIterationCapCaveatSurfaced pins the lesson of the first live gateway run:
+// the raw arm hit the iteration cap on 13 of 28 runs, so its accuracy measured
+// its turn budget rather than its capability — yet the headline "53% vs 84%" was
+// quotable without that context, because the cap only showed up in a separate
+// failure block further down. When the cap binds, the accuracy figure must carry
+// the caveat next to it.
+func TestIterationCapCaveatSurfaced(t *testing.T) {
+	const capMsg = "reached max iterations (6) without a final answer"
+	arm := func(a Arm, v Verdict, err string) ArmResult {
+		return ArmResult{Arm: a, Verdict: v, Scored: true, Samples: 1, Correct: 0, Err: err}
+	}
+	capped := QuestionResult{ID: "q1", Ask: "?", Class: truth.ClassA,
+		RawView: truth.Answered("1"), HDFView: truth.Answered("1"),
+		Raw: arm(ArmRaw, Failed, capMsg), HDF: arm(ArmHDF, Wrong, "")}
+	runs := []ModelRun{{Model: "stub", Results: []QuestionResult{capped}}}
+
+	text := Render(runs[0].Model, runs[0].Results, false, nil)
+	md := RenderMarkdown(RunMeta{Models: []string{"stub"}, MaxIters: 6}, runs, false, nil)
+	for _, out := range []struct{ name, s string }{{"text", text}, {"markdown", md}} {
+		if !strings.Contains(out.s, "iteration cap") {
+			t.Errorf("%s report must flag that the iteration cap bound the run:\n%s", out.name, out.s)
+		}
+		if !strings.Contains(out.s, "lower bound") {
+			t.Errorf("%s report must say a capped arm's accuracy is a lower bound:\n%s", out.name, out.s)
+		}
+	}
+}
+
+// TestNoIterationCapCaveatWhenUnbound keeps the caveat honest: a run where no arm
+// hit the cap must not carry it, or the warning becomes noise readers skip.
+func TestNoIterationCapCaveatWhenUnbound(t *testing.T) {
+	ok := QuestionResult{ID: "q1", Ask: "?", Class: truth.ClassA,
+		RawView: truth.Answered("1"), HDFView: truth.Answered("1"),
+		Raw: ArmResult{Arm: ArmRaw, Verdict: Correct, Scored: true, Samples: 1, Correct: 1},
+		HDF: ArmResult{Arm: ArmHDF, Verdict: Correct, Scored: true, Samples: 1, Correct: 1}}
+	runs := []ModelRun{{Model: "stub", Results: []QuestionResult{ok}}}
+	md := RenderMarkdown(RunMeta{Models: []string{"stub"}, MaxIters: 6}, runs, false, nil)
+	if strings.Contains(md, "iteration cap") {
+		t.Errorf("unbound run must not carry the cap caveat:\n%s", md)
+	}
+}
