@@ -42,9 +42,16 @@ const DefaultSystem = "You are a security analyst. Use the available tools to ge
 	"Then give a final line formatted EXACTLY as: ANSWER: <value> — where <value> is a single number, or a single yes/no, " +
 	"and nothing else on that line."
 
+// DefaultMaxIters is the tool round-trip cap when a caller leaves it unset. At 6
+// the first gateway study truncated 13 of 28 raw-arm runs while its answering
+// runs reached 5 — the distribution was cut off at the boundary rather than
+// tapering, so the raw arm's accuracy measured its turn budget. The CLI default
+// tracks this constant; they must not drift.
+const DefaultMaxIters = 12
+
 // Options controls a run.
 type Options struct {
-	MaxIters    int    // tool round-trip cap per arm (default 6)
+	MaxIters    int    // tool round-trip cap per arm (default DefaultMaxIters)
 	System      string // system prompt (default DefaultSystem)
 	AdHoc       bool   // also measure the conversion-included HDF cost view
 	Concurrency int    // max questions in flight at once (default 1 = serial)
@@ -72,7 +79,7 @@ func (o Options) maxIters() int {
 	if o.MaxIters > 0 {
 		return o.MaxIters
 	}
-	return 6
+	return DefaultMaxIters
 }
 
 func (o Options) system() string {

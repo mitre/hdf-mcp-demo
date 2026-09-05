@@ -47,7 +47,7 @@ func main() {
 	// cut off at the boundary rather than tapering, so the raw arm's accuracy
 	// measured its turn budget. The HDF arm answers in 1-4, so the higher cap
 	// costs it nothing; it buys the raw arm room to show where it actually stops.
-	maxIters := flag.Int("maxiters", 12, "tool round-trip cap per arm; an arm that hits it is reported as capped, and its accuracy is a lower bound")
+	maxIters := flag.Int("maxiters", benchmark.DefaultMaxIters, "tool round-trip cap per arm; an arm that hits it is reported as capped, and its accuracy is a lower bound")
 	maxTokens := flag.Int("maxtokens", 4096, "per-request completion-token cap. Reasoning models spend tokens on hidden reasoning before the answer, so a low cap truncates them into a false abstention")
 	concurrency := flag.Int("concurrency", 0, "max questions in flight at once per model; 0 = 4 for a batching gateway, 2 for local Ollama (each in-flight request needs its own KV cache, so a large local model can exhaust memory)")
 	modelsFlag := flag.String("models", "", "comma-separated models to run; overrides OPENAI_MODEL_LIST/OPENAI_MODEL when set")
