@@ -8,6 +8,7 @@ import (
 
 	"github.com/mitre/hdf-mcp-demo/internal/mcpclient"
 	"github.com/mitre/hdf-mcp-demo/internal/tok"
+	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
 
 // Bookend is one question's model-free token bracket — the two assumptions the
@@ -65,19 +66,25 @@ func ComputeBookends(ctx context.Context, sess *mcpclient.Session, bin, fixtures
 
 // OracleReading is the answer-bearing fields of an oracle payload: hdf_query
 // reports total (the match count even at limit 1), hdf_compliance reports the
-// compliance percentage. The gated oracle test compares these to ground truth.
+// compliance percentage, and an hdf_query page requested with fields=["cwe"]
+// carries each row's CWE references, normalized to their numbers. The gated
+// oracle test compares these to ground truth.
 type OracleReading struct {
 	Total         int
 	HasTotal      bool
 	Compliance    float64
 	HasCompliance bool
+	CWE           []string // distinct CWE numbers on this page's rows, document order
 }
 
 // ReadOracle extracts the answer-bearing fields from a tool payload.
 func ReadOracle(payload string) (OracleReading, error) {
 	var v struct {
-		Total      *int     `json:"total"`
-		Compliance *float64 `json:"compliance"`
+		Total        *int     `json:"total"`
+		Compliance   *float64 `json:"compliance"`
+		Requirements []struct {
+			Cwe []string `json:"cwe"`
+		} `json:"requirements"`
 	}
 	if err := json.Unmarshal([]byte(payload), &v); err != nil {
 		return OracleReading{}, fmt.Errorf("parse oracle payload: %w", err)
@@ -88,6 +95,15 @@ func ReadOracle(payload string) (OracleReading, error) {
 	}
 	if v.Compliance != nil {
 		r.Compliance, r.HasCompliance = *v.Compliance, true
+	}
+	seen := map[string]bool{}
+	for _, row := range v.Requirements {
+		for _, c := range row.Cwe {
+			if n := truth.CWENumber(c); n != "" && !seen[n] {
+				seen[n] = true
+				r.CWE = append(r.CWE, n)
+			}
+		}
 	}
 	return r, nil
 }

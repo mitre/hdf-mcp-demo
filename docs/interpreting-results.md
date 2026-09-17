@@ -63,6 +63,31 @@ often. Richer tools made the agent worse until the responses were trimmed.
 Both are reported because both are real workflows, and they can disagree
 substantially.
 
+## Merged-document questions
+
+The `merged-*` questions model a pipeline that has already combined several
+scanners' results into **one** HDF document with `hdf merge` (hdf-libs
+ADR-0016): one baseline per scanner run, named `<tool>/<original>` and labelled
+with `tool`, `toolVersion` and `sourceDocument`. The harness produces that
+document at staging time exactly as a pipeline would — every source is
+converted, then `hdf merge <sources> -o <merged>` runs through the shipped CLI
+— so it tracks the converters rather than a vendored artifact.
+`fixtures/merged-gosec-zap-grype.hdf.json` is a committed sample of the same
+output for inspection; a gated test regenerates it and fails if it drifts
+(timestamps aside — gosec output has none, so its conversion time is stamped).
+
+The two arms see different things on purpose. The **HDF arm** is told only the
+merged document, so a cross-tool question is one document and, ideally, one
+call. The **raw arm** is told every raw scan file, as before — nothing about the
+merge leaks into its prompt. Ground truth follows the same split: the raw view
+is computed from the scan files, the HDF view from the merged document.
+
+Only the **pipeline** cost view exists for these questions. Merging is a
+deterministic pipeline step, deliberately *not* an MCP tool (ADR-0016 §7), so an
+agent cannot merge on demand; the ad-hoc column is blank for them and they are
+excluded from the ad-hoc totals. Running the bank therefore needs an `hdf`
+binary that has `hdf merge` (`HDF_BIN`, hdf-libs with ADR-0016).
+
 ## The cost multiplier
 
 `mult` is `hdfTok / rawTok` for one question — above 1 means the HDF arm cost

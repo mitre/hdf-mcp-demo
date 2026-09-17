@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // rawGosec is the subset of gosec JSON the classifier reads. gosec emits one
@@ -394,4 +395,66 @@ func GrypeRelatedVulnCount(b []byte) (Answer, error) {
 		}
 	}
 	return Answered(strconv.Itoa(n)), nil
+}
+
+// rawGosecCWE and rawZapCWE read only the CWE references: gosec's cwe.id and
+// ZAP's per-alert cweid. Grype output carries no CWE, so it contributes none.
+type rawGosecCWE struct {
+	Issues []struct {
+		CWE struct {
+			ID string `json:"id"`
+		} `json:"cwe"`
+	} `json:"Issues"`
+}
+
+type rawZapCWE struct {
+	Site []struct {
+		Alerts []struct {
+			CWEID string `json:"cweid"`
+		} `json:"alerts"`
+	} `json:"site"`
+}
+
+// cweCounts reports whether a raw CWE reference names a weakness: ZAP writes
+// "-1" for "no CWE" and an absent id is empty; neither is a CWE.
+func cweCounts(id string) bool {
+	id = strings.TrimSpace(id)
+	return id != "" && id != "-1"
+}
+
+// CrossToolDistinctCWECount is the raw view of the distinct-CWE question across
+// the three scanners (gosec, ZAP, grype, in declaration order): the union of
+// gosec's cwe.id and ZAP's cweid, compared by number. grype output carries no
+// CWE field at all, so the third document is required but contributes nothing —
+// which the raw arm has to discover for itself. The HDF view reads the merged
+// document's normalized `cwe` field ("CWE-22"); both views count the number.
+func CrossToolDistinctCWECount(docs [][]byte) (Answer, error) {
+	if len(docs) != 3 {
+		return Answer{}, fmt.Errorf("distinct-CWE count needs gosec, zap, grype documents; got %d", len(docs))
+	}
+	var g rawGosecCWE
+	if err := json.Unmarshal(docs[0], &g); err != nil {
+		return Answer{}, fmt.Errorf("parse gosec: %w", err)
+	}
+	var z rawZapCWE
+	if err := json.Unmarshal(docs[1], &z); err != nil {
+		return Answer{}, fmt.Errorf("parse zap: %w", err)
+	}
+	if _, err := parseGrype(docs[2]); err != nil {
+		return Answer{}, err
+	}
+	seen := map[string]bool{}
+	for _, i := range g.Issues {
+		if cweCounts(i.CWE.ID) {
+			seen[strings.TrimSpace(i.CWE.ID)] = true
+		}
+	}
+	for _, s := range z.Site {
+		for _, a := range s.Alerts {
+			if cweCounts(a.CWEID) {
+				seen[strings.TrimSpace(a.CWEID)] = true
+			}
+		}
+	}
+	return Answered(strconv.Itoa(len(seen))), nil
 }

@@ -414,11 +414,7 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 				row += fmt.Sprintf(" %s | %s |", vc, vo)
 			}
 			if adHoc {
-				ah := 0
-				if r.HDFAdHoc != nil {
-					ah = r.HDFAdHoc.Cost.TotalTokens()
-				}
-				row += fmt.Sprintf(" %d |", ah)
+				row += fmt.Sprintf(" %s |", adHocCell(r))
 			}
 			b.WriteString(row + "\n")
 		}

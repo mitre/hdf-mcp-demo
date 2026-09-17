@@ -334,3 +334,145 @@ func TestGrypeRelatedVulns(t *testing.T) {
 		t.Errorf("raw related-vuln count = %q, want 45", got.Value)
 	}
 }
+
+// mergedFixture is the committed pipeline sample: fixtures/gosec.json, zap.json
+// and grype.json converted and combined with `hdf merge` (see
+// fixtures/PROVENANCE.md). The merged-document questions read it as ONE HDF
+// document while the raw arm still reads the three scanner files.
+func mergedFixture(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "merged-gosec-zap-grype.hdf.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func threeRawScans(t *testing.T) [][]byte {
+	t.Helper()
+	docs := make([][]byte, 0, 3)
+	for _, f := range []string{"gosec.json", "zap.json", "grype.json"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "fixtures", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, b)
+	}
+	return docs
+}
+
+// TestMergedDistinctCWE pins the distinct-CWE question in both views. Raw: gosec
+// carries cwe.id ("22", "276"), ZAP carries cweid per alert (eight values),
+// grype carries no CWE at all — ten distinct numeric ids. HDF: the merged
+// document's requirement `cwe` fields ("CWE-22" …), the same ten once the prefix
+// is normalized. Class A, and the normalization is stated here, not assumed.
+func TestMergedDistinctCWE(t *testing.T) {
+	raw, err := CrossToolDistinctCWECount(threeRawScans(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !raw.Answerable || raw.Value != "10" {
+		t.Errorf("raw distinct CWE = %+v, want 10", raw)
+	}
+	hdf, err := HDFDistinctCWECount(mergedFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hdf.Answerable || hdf.Value != "10" {
+		t.Errorf("hdf distinct CWE = %+v, want 10", hdf)
+	}
+	if _, err := CrossToolDistinctCWECount(threeRawScans(t)[:2]); err == nil {
+		t.Error("want error when a source document is missing")
+	}
+	// ZAP's "-1" (no CWE) and empty ids must not count as a CWE.
+	if !cweCounts("-1") && !cweCounts("") && cweCounts("22") {
+		return
+	}
+	t.Error("cweCounts must reject -1 and empty and accept a numeric id")
+}
+
+// TestMergedZapHighInBaselines pins the per-tool question on the merged document:
+// ZAP's three riskcode-3 alerts are the three impact>=0.7 requirements under the
+// `owasp zap/` baselines, and nothing from gosec or grype leaks into the count.
+func TestMergedZapHighInBaselines(t *testing.T) {
+	raw, err := Nth(1, ZapHighCount)(threeRawScans(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Value != "3" {
+		t.Errorf("raw ZAP high = %+v, want 3", raw)
+	}
+	hdf, err := HDFImpactCountAtLeastInBaselines("owasp zap/", 0.7)(mergedFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hdf.Answerable || hdf.Value != "3" {
+		t.Errorf("hdf ZAP high on merged doc = %+v, want 3", hdf)
+	}
+	all, err := HDFImpactCountAtLeastInBaselines("", 0.7)(mergedFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.Value != "60" {
+		t.Errorf("an empty prefix counts every baseline: %+v, want 60", all)
+	}
+	if _, err := Nth(5, ZapHighCount)(threeRawScans(t)); err == nil {
+		t.Error("Nth past the end must error, not read the wrong file")
+	}
+}
+
+// TestMergedNISTFamilyFailed pins the cross-tool NIST rollup: 16 failed
+// requirements across all three scanners map to the SC family. No raw scanner
+// output carries a NIST mapping, so the raw view is unanswerable — Class C by
+// nature, which is the honest finding: the family view exists only after
+// normalization.
+func TestMergedNISTFamilyFailed(t *testing.T) {
+	hdf, err := HDFFailedInNISTFamily("SC")(mergedFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hdf.Answerable || hdf.Value != "16" {
+		t.Errorf("hdf failed-in-SC on merged doc = %+v, want 16", hdf)
+	}
+	ac, err := HDFFailedInNISTFamily("AC")(mergedFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ac.Value != "2" {
+		t.Errorf("hdf failed-in-AC = %+v, want 2", ac)
+	}
+	none, err := HDFFailedInNISTFamily("ZZ")(mergedFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.Value != "0" {
+		t.Errorf("an unmapped family counts 0, got %+v", none)
+	}
+}
+
+// TestNistFamily pins the family parse on the shapes NIST ids take, including
+// enhancements — the merged fixture carries only bare ids, so this is where a
+// naive split on '-' would be caught.
+func TestNistFamily(t *testing.T) {
+	cases := map[string]string{
+		"AC-2": "AC", "SC-8(1)": "SC", "SC-8 (1)": "SC", " si-10 ": "SI", "RA-5(2)(a)": "RA", "": "", "CM": "CM",
+	}
+	for in, want := range cases {
+		if got := nistFamily(in); got != want {
+			t.Errorf("nistFamily(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCWENumber pins the normalization the HDF view applies: prefix-insensitive,
+// case-insensitive, and "-1"/empty are not CWEs (ZAP's "no CWE" marker).
+func TestCWENumber(t *testing.T) {
+	cases := map[string]string{
+		"CWE-22": "22", "cwe-22": "22", "22": "22", " CWE-276 ": "276", "-1": "", "CWE--1": "", "": "", "   ": "",
+	}
+	for in, want := range cases {
+		if got := CWENumber(in); got != want {
+			t.Errorf("CWENumber(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

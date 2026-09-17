@@ -75,3 +75,44 @@ application) holding a *reference* to the SBOM file, so the 15 package names nev
 become queryable data. The raw arm can therefore join SBOM packages against grype
 artifacts while the HDF arm cannot, making the SBOM×vuln join a genuine raw-only
 (Class D) question until inventory ingestion lands (hdf-libs-ixfr).
+
+## Merged pipeline sample
+
+`merged-gosec-zap-grype.hdf.json` is what a pipeline hands the MCP once it has
+normalized each scan and combined them with `hdf merge` (hdf-libs ADR-0016): one
+HDF results document, one baseline per scanner run, each named
+`<tool>/<original name>` and labelled `tool` / `toolVersion` / `sourceDocument`,
+with every scan's own root provenance kept under `extensions["hdf-merge"]`.
+It is **derived**, not vendored — regenerate it with the same three commands and
+it matches byte-for-byte apart from timestamps: gosec output carries no
+timestamp, so `hdf convert --from gosec` stamps the conversion time into its
+`results[].startTime`, which the merge then carries as the root `timestamp` and
+the gosec provenance entry. ZAP and grype keep their own timestamps. The merge
+itself is deterministic; the gated test `TestMergedSample_MatchesPipelineOutput`
+in `internal/benchmark` regenerates the sample and compares it with timestamps
+masked:
+
+```
+hdf convert --from gosec fixtures/gosec.json -o gosec.hdf.json
+hdf convert --from zap   fixtures/zap.json   -o zap.hdf.json
+hdf convert --from grype fixtures/grype.json -o grype.hdf.json
+hdf merge gosec.hdf.json zap.hdf.json grype.hdf.json -o merged-gosec-zap-grype.hdf.json
+```
+
+| Measure | Value |
+|---------|------:|
+| baselines | 6 (`gosec/gosec Scan`; `owasp zap/OWASP ZAP Scan: <site>` ×4; `grype/golang:1.12-alpine`) |
+| requirements | 120 (3 + 28 + 89) |
+| components | 5 |
+| distinct CWE ids (gosec ∪ ZAP; grype carries none) | 10 |
+| ZAP findings at impact ≥ 0.7 | 3 |
+| failed requirements mapped to NIST family SC | 16 |
+
+**Tooling:** `hdf` built from hdf-libs `feat/multi-scanner-merge` at `69799f2c`
+(the branch that adds `hdf merge`; ADR-0016), generated 2026-09-16.
+sha256 `a8d2dcfed8abff6bfd860f617664fa687454fb0d9c231b90ab4380eeaca781ca`.
+
+The benchmark does **not** read this file: `merged-*` questions merge at staging
+time from the raw fixtures so they track the converters. The file exists so the
+document a pipeline would produce can be inspected, and pointed at by an MCP
+`HDF_MCP_ROOT`, without running anything.

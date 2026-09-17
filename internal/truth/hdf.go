@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // hdfDoc is the subset of an HDF Results document the classifier reads: the
@@ -12,18 +13,48 @@ import (
 // requirements answers "distinct rule violations" while counting results answers
 // "raw finding volume".
 type hdfDoc struct {
-	Baselines []struct {
-		Requirements []hdfRequirement `json:"requirements"`
-	} `json:"baselines"`
+	Baselines []hdfBaseline `json:"baselines"`
+}
+
+// hdfBaseline carries the name because a merged document (hdf merge) names each
+// baseline `<tool>/<original>`, which is how a per-tool question selects one
+// scanner's requirements inside one document.
+type hdfBaseline struct {
+	Name         string           `json:"name"`
+	Requirements []hdfRequirement `json:"requirements"`
 }
 
 type hdfRequirement struct {
-	ID      string  `json:"id"`
-	Impact  float64 `json:"impact"`
-	Code    string  `json:"code"` // verbatim source finding (converter passthrough)
+	ID      string   `json:"id"`
+	Impact  float64  `json:"impact"`
+	Code    string   `json:"code"` // verbatim source finding (converter passthrough)
+	Cwe     []string `json:"cwe"`  // normalized cross-source key, e.g. "CWE-22"
+	Tags    hdfTags  `json:"tags"` // control mappings the converter attached
 	Results []struct {
 		Status string `json:"status"`
 	} `json:"results"`
+}
+
+// hdfTags reads the nist mapping leniently: converters emit an array, but the
+// schema also permits a single string.
+type hdfTags struct {
+	Nist json.RawMessage `json:"nist"`
+}
+
+// nistControls returns the requirement's NIST control tags as strings.
+func (t hdfTags) nistControls() []string {
+	if len(t.Nist) == 0 {
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(t.Nist, &many); err == nil {
+		return many
+	}
+	var one string
+	if err := json.Unmarshal(t.Nist, &one); err == nil && one != "" {
+		return []string{one}
+	}
+	return nil
 }
 
 func parseHDF(b []byte) (hdfDoc, error) {
@@ -41,6 +72,106 @@ func hdfRequirements(d hdfDoc) []hdfRequirement {
 		out = append(out, b.Requirements...)
 	}
 	return out
+}
+
+// HDFDistinctCWECount is the number of distinct CWE ids referenced by any
+// requirement in the document, read from the normalized `cwe` field. Ids are
+// compared by number ("CWE-22" and "22" are the same weakness), which is the
+// normalization the raw view applies to gosec's cwe.id and ZAP's cweid.
+func HDFDistinctCWECount(b []byte) (Answer, error) {
+	d, err := parseHDF(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	seen := map[string]bool{}
+	for _, r := range hdfRequirements(d) {
+		for _, c := range r.Cwe {
+			if n := CWENumber(c); n != "" {
+				seen[n] = true
+			}
+		}
+	}
+	return Answered(strconv.Itoa(len(seen))), nil
+}
+
+// CWENumber reduces a CWE reference to its number: "CWE-22" → "22", "22" → "22".
+// Empty and "-1" (ZAP's "no CWE") reduce to "" and are not counted. Exported so
+// the benchmark's oracle reader normalizes exactly as the ground truth does.
+func CWENumber(s string) string {
+	s = strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(s)), "CWE-"))
+	if s == "" || s == "-1" {
+		return ""
+	}
+	return s
+}
+
+// HDFImpactCountAtLeastInBaselines counts requirements at impact >= threshold in
+// the baselines whose name starts with prefix — on a merged document, one
+// scanner's findings (`owasp zap/`). An empty prefix counts every baseline.
+func HDFImpactCountAtLeastInBaselines(prefix string, threshold float64) func([]byte) (Answer, error) {
+	return func(b []byte) (Answer, error) {
+		d, err := parseHDF(b)
+		if err != nil {
+			return Answer{}, err
+		}
+		n := 0
+		for _, bl := range d.Baselines {
+			if !strings.HasPrefix(bl.Name, prefix) {
+				continue
+			}
+			for _, r := range bl.Requirements {
+				if r.Impact >= threshold {
+					n++
+				}
+			}
+		}
+		return Answered(strconv.Itoa(n)), nil
+	}
+}
+
+// HDFFailedInNISTFamily counts requirements with at least one failed result that
+// map to the given NIST 800-53 family (the control's prefix before '-' or '(',
+// so AC-2 and AC-6(1) are both "AC"). The family view exists only after
+// normalization: no raw scanner output carries a NIST mapping.
+func HDFFailedInNISTFamily(family string) func([]byte) (Answer, error) {
+	family = strings.ToUpper(strings.TrimSpace(family))
+	return func(b []byte) (Answer, error) {
+		d, err := parseHDF(b)
+		if err != nil {
+			return Answer{}, err
+		}
+		n := 0
+		for _, r := range hdfRequirements(d) {
+			if !hasFailedResult(r) {
+				continue
+			}
+			for _, c := range r.Tags.nistControls() {
+				if nistFamily(c) == family {
+					n++
+					break
+				}
+			}
+		}
+		return Answered(strconv.Itoa(n)), nil
+	}
+}
+
+func hasFailedResult(r hdfRequirement) bool {
+	for _, res := range r.Results {
+		if res.Status == "failed" {
+			return true
+		}
+	}
+	return false
+}
+
+// nistFamily is the family of a NIST control id: "AC-2" → "AC", "SC-8(1)" → "SC".
+func nistFamily(control string) string {
+	c := strings.TrimSpace(control)
+	if i := strings.IndexAny(c, "-("); i > 0 {
+		c = c[:i]
+	}
+	return strings.ToUpper(strings.TrimSpace(c))
 }
 
 // HDFRequirementCount is the number of rule-level requirements — the deduplicated

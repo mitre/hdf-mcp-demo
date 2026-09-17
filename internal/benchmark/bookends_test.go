@@ -242,6 +242,26 @@ func TestOracles_MatchGroundTruth(t *testing.T) {
 				return
 			}
 
+			// The distinct-CWE oracle pages through requirement rows with the cwe
+			// correlation field; the answer is the number of distinct CWE numbers
+			// across every page, not any page's total.
+			if q.ID == "merged-distinct-cwe-count" {
+				seen := map[string]bool{}
+				for _, resp := range bk.Responses {
+					r, err := ReadOracle(resp)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, c := range r.CWE {
+						seen[c] = true
+					}
+				}
+				if got := strconv.Itoa(len(seen)); got != key.Value {
+					t.Errorf("oracle distinct CWE %s vs ground truth %s — the paged rows do not cover the document", got, key.Value)
+				}
+				return
+			}
+
 			// A multi-call oracle (the cross-format aggregate) answers with the SUM
 			// of its per-document totals; a rate oracle answers with compliance.
 			var totalSum int
@@ -288,11 +308,37 @@ func loadDocs(t *testing.T, root string, q Question) (raw, hdf [][]byte) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		hb, err := os.ReadFile(root + "/" + src.HDFName)
+		raw = append(raw, rb)
+	}
+	// The HDF view is the per-source documents — or, for a merged-document
+	// question, the single document hdf merge produced from them.
+	for _, name := range q.hdfNames() {
+		hb, err := os.ReadFile(root + "/" + name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, hdf = append(raw, rb), append(hdf, hb)
+		hdf = append(hdf, hb)
 	}
 	return
+}
+
+// TestReadOracle_CWE: an hdf_query page requested with fields=["cwe"] yields the
+// distinct CWE numbers on its rows — normalized, deduplicated, in row order —
+// and a page without the field yields none.
+func TestReadOracle_CWE(t *testing.T) {
+	r, err := ReadOracle(`{"total":120,"returned":3,"requirements":[` +
+		`{"id":"a","cwe":["CWE-22"]},{"id":"b","cwe":["cwe-22","CWE-276"]},{"id":"c"},{"id":"d","cwe":["-1"]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.HasTotal || r.Total != 120 {
+		t.Errorf("total = %+v, want 120", r)
+	}
+	if got := strings.Join(r.CWE, ","); got != "22,276" {
+		t.Errorf("CWE = %q, want \"22,276\" (deduplicated, normalized, -1 dropped)", got)
+	}
+	r, err = ReadOracle(`{"total":3,"returned":1,"requirements":[{"id":"x"}]}`)
+	if err != nil || len(r.CWE) != 0 {
+		t.Errorf("no cwe field → no CWE reading; got %+v (%v)", r, err)
+	}
 }

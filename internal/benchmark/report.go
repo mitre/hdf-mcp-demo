@@ -44,11 +44,7 @@ func Render(model string, results []QuestionResult, adHoc bool, bks []Bookend) s
 			line += fmt.Sprintf(" %8s %8s", vc, vo)
 		}
 		if adHoc {
-			ah := 0
-			if r.HDFAdHoc != nil {
-				ah = r.HDFAdHoc.Cost.TotalTokens()
-			}
-			line += fmt.Sprintf(" %8d", ah)
+			line += fmt.Sprintf(" %8s", adHocCell(r))
 		}
 		b.WriteString(line + "\n")
 	}
@@ -370,4 +366,15 @@ func trunc(s string, n int) string {
 // SortByID orders results deterministically for stable output.
 func SortByID(rs []QuestionResult) {
 	sort.Slice(rs, func(i, j int) bool { return rs[i].ID < rs[j].ID })
+}
+
+// adHocCell renders a question's ad-hoc token cost, or "—" when the question has
+// no ad-hoc arm: a merged-document question is answered from a document a
+// pipeline produced with hdf merge, and merging is not something the agent can
+// do on demand (ADR-0016 §7), so there is no conversion-included view to charge.
+func adHocCell(r QuestionResult) string {
+	if r.HDFAdHoc == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%d", r.HDFAdHoc.Cost.TotalTokens())
 }
