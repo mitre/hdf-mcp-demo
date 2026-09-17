@@ -369,9 +369,9 @@ func SortByID(rs []QuestionResult) {
 }
 
 // adHocCell renders a question's ad-hoc token cost, or "—" when the question has
-// no ad-hoc arm: a merged-document question is answered from a document a
-// pipeline produced with hdf merge, and merging is not something the agent can
-// do on demand (ADR-0016 §7), so there is no conversion-included view to charge.
+// no ad-hoc arm. Every question has one when the ad-hoc view is requested; the
+// pointer stays the representation of "this arm did not run", and absence is
+// rendered as absence rather than as a zero cost.
 func adHocCell(r QuestionResult) string {
 	if r.HDFAdHoc == nil {
 		return "—"

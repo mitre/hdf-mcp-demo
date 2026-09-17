@@ -16,7 +16,7 @@ type hdfDoc struct {
 	Baselines []hdfBaseline `json:"baselines"`
 }
 
-// hdfBaseline carries the name because a merged document (hdf merge) names each
+// hdfBaseline carries the name because a multi-baseline document names each
 // baseline `<tool>/<original>`, which is how a per-tool question selects one
 // scanner's requirements inside one document.
 type hdfBaseline struct {
@@ -75,19 +75,23 @@ func hdfRequirements(d hdfDoc) []hdfRequirement {
 }
 
 // HDFDistinctCWECount is the number of distinct CWE ids referenced by any
-// requirement in the document, read from the normalized `cwe` field. Ids are
-// compared by number ("CWE-22" and "22" are the same weakness), which is the
-// normalization the raw view applies to gosec's cwe.id and ZAP's cweid.
-func HDFDistinctCWECount(b []byte) (Answer, error) {
-	d, err := parseHDF(b)
-	if err != nil {
-		return Answer{}, err
-	}
+// requirement across the given documents — one converted scan each — read from
+// the normalized `cwe` field. A weakness cited by several scanners counts once:
+// the union, not a per-document sum. Ids are compared by number ("CWE-22" and
+// "22" are the same weakness), which is the normalization the raw view applies
+// to gosec's cwe.id and ZAP's cweid.
+func HDFDistinctCWECount(docs [][]byte) (Answer, error) {
 	seen := map[string]bool{}
-	for _, r := range hdfRequirements(d) {
-		for _, c := range r.Cwe {
-			if n := CWENumber(c); n != "" {
-				seen[n] = true
+	for _, b := range docs {
+		d, err := parseHDF(b)
+		if err != nil {
+			return Answer{}, err
+		}
+		for _, r := range hdfRequirements(d) {
+			for _, c := range r.Cwe {
+				if n := CWENumber(c); n != "" {
+					seen[n] = true
+				}
 			}
 		}
 	}
@@ -105,50 +109,30 @@ func CWENumber(s string) string {
 	return s
 }
 
-// HDFImpactCountAtLeastInBaselines counts requirements at impact >= threshold in
-// the baselines whose name starts with prefix — on a merged document, one
-// scanner's findings (`owasp zap/`). An empty prefix counts every baseline.
-func HDFImpactCountAtLeastInBaselines(prefix string, threshold float64) func([]byte) (Answer, error) {
-	return func(b []byte) (Answer, error) {
-		d, err := parseHDF(b)
-		if err != nil {
-			return Answer{}, err
-		}
-		n := 0
-		for _, bl := range d.Baselines {
-			if !strings.HasPrefix(bl.Name, prefix) {
-				continue
-			}
-			for _, r := range bl.Requirements {
-				if r.Impact >= threshold {
-					n++
-				}
-			}
-		}
-		return Answered(strconv.Itoa(n)), nil
-	}
-}
-
-// HDFFailedInNISTFamily counts requirements with at least one failed result that
-// map to the given NIST 800-53 family (the control's prefix before '-' or '(',
-// so AC-2 and AC-6(1) are both "AC"). The family view exists only after
-// normalization: no raw scanner output carries a NIST mapping.
-func HDFFailedInNISTFamily(family string) func([]byte) (Answer, error) {
+// HDFFailedInNISTFamily counts, across the given documents, the requirements
+// with at least one failed result that map to the given NIST 800-53 family (the
+// control's prefix before '-' or '(', so AC-2 and AC-6(1) are both "AC"). A sum
+// over documents: each scanner's failed requirements are distinct findings. The
+// family view exists only after normalization: no raw scanner output carries a
+// NIST mapping.
+func HDFFailedInNISTFamily(family string) func([][]byte) (Answer, error) {
 	family = strings.ToUpper(strings.TrimSpace(family))
-	return func(b []byte) (Answer, error) {
-		d, err := parseHDF(b)
-		if err != nil {
-			return Answer{}, err
-		}
+	return func(docs [][]byte) (Answer, error) {
 		n := 0
-		for _, r := range hdfRequirements(d) {
-			if !hasFailedResult(r) {
-				continue
+		for _, b := range docs {
+			d, err := parseHDF(b)
+			if err != nil {
+				return Answer{}, err
 			}
-			for _, c := range r.Tags.nistControls() {
-				if nistFamily(c) == family {
-					n++
-					break
+			for _, r := range hdfRequirements(d) {
+				if !hasFailedResult(r) {
+					continue
+				}
+				for _, c := range r.Tags.nistControls() {
+					if nistFamily(c) == family {
+						n++
+						break
+					}
 				}
 			}
 		}

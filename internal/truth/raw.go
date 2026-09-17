@@ -426,8 +426,9 @@ func cweCounts(id string) bool {
 // the three scanners (gosec, ZAP, grype, in declaration order): the union of
 // gosec's cwe.id and ZAP's cweid, compared by number. grype output carries no
 // CWE field at all, so the third document is required but contributes nothing —
-// which the raw arm has to discover for itself. The HDF view reads the merged
-// document's normalized `cwe` field ("CWE-22"); both views count the number.
+// which the raw arm has to discover for itself. The HDF view reads each
+// converted document's normalized `cwe` field ("CWE-22"); both views count the
+// number, as a union across scanners.
 func CrossToolDistinctCWECount(docs [][]byte) (Answer, error) {
 	if len(docs) != 3 {
 		return Answer{}, fmt.Errorf("distinct-CWE count needs gosec, zap, grype documents; got %d", len(docs))

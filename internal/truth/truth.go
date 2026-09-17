@@ -65,7 +65,7 @@ func Primary(fn func([]byte) (Answer, error)) func([][]byte) (Answer, error) {
 
 // Nth adapts a single-document ground-truth function to the multi-document
 // signature by handing it the question's i-th source — for a per-tool question
-// over a merged document, where the raw arm is told every scanner file but the
+// over a set of scanner documents, where each arm is told every file but the
 // fact lives in one of them.
 func Nth(i int, fn func([]byte) (Answer, error)) func([][]byte) (Answer, error) {
 	return func(docs [][]byte) (Answer, error) {

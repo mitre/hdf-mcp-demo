@@ -136,11 +136,11 @@ func TestBenchmark_Pipeline(t *testing.T) {
 		"cross-format-high-count": truth.ClassA, // 0+3+57 == 60 across three severity vocabularies — the mapping is band-aligned
 		"grype-fixed-vulns":       truth.ClassA, // 5 == 5 distinct IDs fixed between the real alpine:3.11/3.12 pair
 		"sbom-vuln-free-packages": truth.ClassD, // the join key is carried as a BOM reference, not embedded — raw-only
-		// Merged-document questions (ADR-0016): the HDF arm reads ONE document that
-		// `hdf merge` produced from the three scans; the raw arm still reads three.
-		"merged-distinct-cwe-count":   truth.ClassA, // 10 == 10: gosec cwe.id ∪ ZAP cweid vs the merged doc's normalized cwe field
-		"merged-zap-high-count":       truth.ClassA, // 3 == 3: ZAP riskcode 3 vs impact>=0.7 under the `owasp zap/` baselines
-		"merged-nist-sc-failed-count": truth.ClassC, // 16: a NIST-family rollup across tools exists only after normalization
+		// Multi-source questions (ADR-0016 §7): the HDF arm reads the three
+		// converted documents (one call over sources[]); the raw arm reads three scans.
+		"multi-distinct-cwe-count":   truth.ClassA, // 10 == 10: gosec cwe.id ∪ ZAP cweid vs the union of the converted docs' normalized cwe fields
+		"multi-zap-high-count":       truth.ClassA, // 3 == 3: ZAP riskcode 3 vs impact>=0.7 in zap.hdf.json, the second source
+		"multi-nist-sc-failed-count": truth.ClassC, // 16: a NIST-family rollup across tools exists only after normalization
 	}
 	for _, r := range results {
 		if want[r.ID] != r.Class {

@@ -2,6 +2,7 @@ package truth
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -335,17 +336,36 @@ func TestGrypeRelatedVulns(t *testing.T) {
 	}
 }
 
-// mergedFixture is the committed pipeline sample: fixtures/gosec.json, zap.json
-// and grype.json converted and combined with `hdf merge` (see
-// fixtures/PROVENANCE.md). The merged-document questions read it as ONE HDF
-// document while the raw arm still reads the three scanner files.
-func mergedFixture(t *testing.T) []byte {
+// convertedScans converts fixtures/gosec.json, zap.json and grype.json with the
+// shipped hdf CLI into a temp dir and returns the three HDF documents in that
+// order — the same documents the benchmark stages, so the HDF view of ground
+// truth is computed over what the converters produce today rather than a
+// committed copy that would drift. Gated on HDF_BIN (or hdf on PATH).
+func convertedScans(t *testing.T) [][]byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "merged-gosec-zap-grype.hdf.json"))
-	if err != nil {
-		t.Fatal(err)
+	bin := os.Getenv("HDF_BIN")
+	if bin == "" {
+		p, err := exec.LookPath("hdf")
+		if err != nil {
+			t.Skip("set HDF_BIN=/path/to/hdf (or put hdf on PATH) to convert the three scans")
+		}
+		bin = p
 	}
-	return b
+	dir := t.TempDir()
+	docs := make([][]byte, 0, 3)
+	for _, s := range []struct{ raw, from string }{{"gosec.json", "gosec"}, {"zap.json", "zap"}, {"grype.json", "grype"}} {
+		out := filepath.Join(dir, s.raw+".hdf.json")
+		cmd := exec.Command(bin, "convert", "--from", s.from, filepath.Join("..", "..", "fixtures", s.raw), "-o", out)
+		if o, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("hdf convert --from %s: %v: %s", s.from, err, o)
+		}
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		docs = append(docs, b)
+	}
+	return docs
 }
 
 func threeRawScans(t *testing.T) [][]byte {
@@ -361,12 +381,13 @@ func threeRawScans(t *testing.T) [][]byte {
 	return docs
 }
 
-// TestMergedDistinctCWE pins the distinct-CWE question in both views. Raw: gosec
+// TestMultiDistinctCWE pins the distinct-CWE question in both views. Raw: gosec
 // carries cwe.id ("22", "276"), ZAP carries cweid per alert (eight values),
-// grype carries no CWE at all — ten distinct numeric ids. HDF: the merged
-// document's requirement `cwe` fields ("CWE-22" …), the same ten once the prefix
-// is normalized. Class A, and the normalization is stated here, not assumed.
-func TestMergedDistinctCWE(t *testing.T) {
+// grype carries no CWE at all — ten distinct numeric ids. HDF: the union of the
+// three converted documents' requirement `cwe` fields ("CWE-22" …), the same
+// ten once the prefix is normalized. Class A, and the normalization is stated
+// here, not assumed.
+func TestMultiDistinctCWE(t *testing.T) {
 	raw, err := CrossToolDistinctCWECount(threeRawScans(t))
 	if err != nil {
 		t.Fatal(err)
@@ -374,27 +395,37 @@ func TestMergedDistinctCWE(t *testing.T) {
 	if !raw.Answerable || raw.Value != "10" {
 		t.Errorf("raw distinct CWE = %+v, want 10", raw)
 	}
-	hdf, err := HDFDistinctCWECount(mergedFixture(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hdf.Answerable || hdf.Value != "10" {
-		t.Errorf("hdf distinct CWE = %+v, want 10", hdf)
-	}
 	if _, err := CrossToolDistinctCWECount(threeRawScans(t)[:2]); err == nil {
 		t.Error("want error when a source document is missing")
 	}
 	// ZAP's "-1" (no CWE) and empty ids must not count as a CWE.
-	if !cweCounts("-1") && !cweCounts("") && cweCounts("22") {
-		return
+	if cweCounts("-1") || cweCounts("") || !cweCounts("22") {
+		t.Error("cweCounts must reject -1 and empty and accept a numeric id")
 	}
-	t.Error("cweCounts must reject -1 and empty and accept a numeric id")
+	docs := convertedScans(t)
+	hdf, err := HDFDistinctCWECount(docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hdf.Answerable || hdf.Value != "10" {
+		t.Errorf("hdf distinct CWE across the three documents = %+v, want 10", hdf)
+	}
+	// The union is across documents, not a sum: ZAP alone carries 8, gosec 2,
+	// grype 0; a per-document sum would also be 10 here, so pin a case where a
+	// CWE repeats across documents — ZAP twice must still be 8.
+	twice, err := HDFDistinctCWECount([][]byte{docs[1], docs[1]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if twice.Value != "8" {
+		t.Errorf("the same document twice must not double-count: %+v, want 8", twice)
+	}
 }
 
-// TestMergedZapHighInBaselines pins the per-tool question on the merged document:
-// ZAP's three riskcode-3 alerts are the three impact>=0.7 requirements under the
-// `owasp zap/` baselines, and nothing from gosec or grype leaks into the count.
-func TestMergedZapHighInBaselines(t *testing.T) {
+// TestMultiZapHigh pins the per-tool question over a set: ZAP's three riskcode-3
+// alerts are the three impact>=0.7 requirements of zap.hdf.json, the second
+// source — and across all three documents the same threshold counts 60.
+func TestMultiZapHigh(t *testing.T) {
 	raw, err := Nth(1, ZapHighCount)(threeRawScans(t))
 	if err != nil {
 		t.Fatal(err)
@@ -402,56 +433,78 @@ func TestMergedZapHighInBaselines(t *testing.T) {
 	if raw.Value != "3" {
 		t.Errorf("raw ZAP high = %+v, want 3", raw)
 	}
-	hdf, err := HDFImpactCountAtLeastInBaselines("owasp zap/", 0.7)(mergedFixture(t))
+	if _, err := Nth(5, ZapHighCount)(threeRawScans(t)); err == nil {
+		t.Error("Nth past the end must error, not read the wrong file")
+	}
+	docs := convertedScans(t)
+	hdf, err := Nth(1, HDFImpactCountAtLeast(0.7))(docs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !hdf.Answerable || hdf.Value != "3" {
-		t.Errorf("hdf ZAP high on merged doc = %+v, want 3", hdf)
+		t.Errorf("hdf ZAP high on zap.hdf.json = %+v, want 3", hdf)
 	}
-	all, err := HDFImpactCountAtLeastInBaselines("", 0.7)(mergedFixture(t))
+	all, err := HDFImpactTotalAtLeast(0.7)(docs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if all.Value != "60" {
-		t.Errorf("an empty prefix counts every baseline: %+v, want 60", all)
-	}
-	if _, err := Nth(5, ZapHighCount)(threeRawScans(t)); err == nil {
-		t.Error("Nth past the end must error, not read the wrong file")
+		t.Errorf("impact>=0.7 across all three documents = %+v, want 60", all)
 	}
 }
 
-// TestMergedNISTFamilyFailed pins the cross-tool NIST rollup: 16 failed
-// requirements across all three scanners map to the SC family. No raw scanner
-// output carries a NIST mapping, so the raw view is unanswerable — Class C by
-// nature, which is the honest finding: the family view exists only after
+// TestMultiNISTFamilyFailed pins the cross-tool NIST rollup: 16 failed
+// requirements across the three converted documents map to the SC family. No raw
+// scanner output carries a NIST mapping, so the raw view is unanswerable — Class
+// C by nature, which is the honest finding: the family view exists only after
 // normalization.
-func TestMergedNISTFamilyFailed(t *testing.T) {
-	hdf, err := HDFFailedInNISTFamily("SC")(mergedFixture(t))
+func TestMultiNISTFamilyFailed(t *testing.T) {
+	docs := convertedScans(t)
+	hdf, err := HDFFailedInNISTFamily("SC")(docs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !hdf.Answerable || hdf.Value != "16" {
-		t.Errorf("hdf failed-in-SC on merged doc = %+v, want 16", hdf)
+		t.Errorf("hdf failed-in-SC across the set = %+v, want 16", hdf)
 	}
-	ac, err := HDFFailedInNISTFamily("AC")(mergedFixture(t))
+	ac, err := HDFFailedInNISTFamily("AC")(docs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ac.Value != "2" {
 		t.Errorf("hdf failed-in-AC = %+v, want 2", ac)
 	}
-	none, err := HDFFailedInNISTFamily("ZZ")(mergedFixture(t))
+	none, err := HDFFailedInNISTFamily("ZZ")(docs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if none.Value != "0" {
 		t.Errorf("an unmapped family counts 0, got %+v", none)
 	}
+	// Per-document shares: every one of the 16 is a ZAP finding (gosec and grype
+	// map to no SC control). The count is a SUM over documents — each scanner's
+	// failed requirements are distinct findings — so the ZAP document twice is
+	// 32, not 16 (unlike the distinct-CWE union).
+	for i, want := range map[int]string{0: "0", 1: "16", 2: "0"} {
+		got, err := HDFFailedInNISTFamily("SC")(docs[i : i+1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Value != want {
+			t.Errorf("failed-in-SC for document %d = %+v, want %s", i, got, want)
+		}
+	}
+	twice, err := HDFFailedInNISTFamily("SC")([][]byte{docs[1], docs[1]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if twice.Value != "32" {
+		t.Errorf("the same document twice must sum to 32: %+v", twice)
+	}
 }
 
 // TestNistFamily pins the family parse on the shapes NIST ids take, including
-// enhancements — the merged fixture carries only bare ids, so this is where a
+// enhancements — the converted scans carry only bare ids, so this is where a
 // naive split on '-' would be caught.
 func TestNistFamily(t *testing.T) {
 	cases := map[string]string{

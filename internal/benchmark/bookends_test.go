@@ -245,7 +245,7 @@ func TestOracles_MatchGroundTruth(t *testing.T) {
 			// The distinct-CWE oracle pages through requirement rows with the cwe
 			// correlation field; the answer is the number of distinct CWE numbers
 			// across every page, not any page's total.
-			if q.ID == "merged-distinct-cwe-count" {
+			if q.ID == "multi-distinct-cwe-count" {
 				seen := map[string]bool{}
 				for _, resp := range bk.Responses {
 					r, err := ReadOracle(resp)
@@ -310,8 +310,7 @@ func loadDocs(t *testing.T, root string, q Question) (raw, hdf [][]byte) {
 		}
 		raw = append(raw, rb)
 	}
-	// The HDF view is the per-source documents — or, for a merged-document
-	// question, the single document hdf merge produced from them.
+	// The HDF view is the per-source converted documents.
 	for _, name := range q.hdfNames() {
 		hb, err := os.ReadFile(root + "/" + name)
 		if err != nil {

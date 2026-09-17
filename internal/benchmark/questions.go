@@ -45,16 +45,9 @@ type Question struct {
 	ID      string
 	Ask     string   // natural-language question; the harness appends the file names per arm
 	Sources []Source // documents the question reads, in the order both arms are told about them
-	// Merged names ONE HDF document the HDF arm reads in place of the per-source
-	// documents: after every Source is normalized, the shipped hdf CLI combines
-	// them (`hdf merge <sources> -o <Merged>`) exactly as a pipeline would
-	// (ADR-0016). The raw arm is still told every raw fixture; the HDF view of
-	// ground truth reads the merged document. The ad-hoc cost view does not
-	// exist for such a question — merging is a pipeline step, not an MCP tool.
-	Merged string
-	Kind   Kind
-	Intent IntentView // Class B only
-	Truth  truth.Question
+	Kind    Kind
+	Intent  IntentView // Class B only
+	Truth   truth.Question
 	// Exactly one of Oracle / OracleUnreachable is set: either the ideal-play
 	// call(s) for the bounded surface, or the reason no bounded call can answer
 	// (which is itself a reported finding, not an excuse).
@@ -81,9 +74,6 @@ func (q Question) rawNames() []string {
 }
 
 func (q Question) hdfNames() []string {
-	if q.Merged != "" {
-		return []string{q.Merged}
-	}
 	out := make([]string, 0, len(q.Sources))
 	for _, s := range q.Sources {
 		out = append(out, s.HDFName)
@@ -270,21 +260,23 @@ func Bank() []Question {
 			Truth:             truth.Question{Raw: truth.SBOMVulnFreePackageCount, HDF: truth.HDFVulnFreePackageCount},
 			OracleUnreachable: "the join key (package inventory) is carried as a BOM reference, not embedded — no HDF document or read tool holds it",
 		},
-		// The merged-document questions (ADR-0016): a pipeline has already combined
-		// the three scans into ONE HDF document (`hdf merge`, one baseline per
-		// scanner, named `<tool>/<original>`), so the HDF arm reads one file where
-		// the raw arm reads three. This is the regime normalization exists for —
-		// the question is whether one document makes a cross-tool question one
-		// call. The raw arm is told the three scan files; nothing about the
-		// merged document leaks into its prompt.
+		// The multi-source questions (ADR-0016 §7): the pipeline has produced one
+		// HDF document per scanner, and the HDF arm is told all three. The read
+		// tools take `sources[]`, so a cross-tool question can be ONE call over the
+		// set — the server combines the documents in memory, one baseline per
+		// scanner named `<tool>/<original>` — where the raw arm reads three scanner
+		// files in three formats. Whether the model reaches for `sources[]` or makes
+		// three calls is part of what is measured. Nothing about the set leaks into
+		// the raw arm's prompt.
 		//
 		// Distinct CWEs is Class A by construction and the normalization is
 		// stated: gosec cites cwe.id ("22"), ZAP cites cweid per alert, grype
-		// cites none; the merged document carries each requirement's normalized
-		// `cwe` ("CWE-22"). Both views compare by number. The oracle pages the
-		// rows with the cwe correlation field (3 pages of 40 cover 120 rows).
+		// cites none; each converted document carries its requirements' normalized
+		// `cwe` ("CWE-22"). Both views compare by number, as a union across
+		// scanners. The oracle pages the set's rows with the cwe correlation field
+		// (3 pages of 40 cover 120 rows).
 		{
-			ID:   "merged-distinct-cwe-count",
+			ID:   "multi-distinct-cwe-count",
 			Ask:  "How many DISTINCT CWE IDs are referenced across the gosec (SAST), ZAP (DAST), and grype (vulnerability) scans together? Count a weakness once no matter how many findings cite it.",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
@@ -292,21 +284,20 @@ func Bank() []Question {
 				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
 				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
 			},
-			Merged: "merged-gosec-zap-grype.hdf.json",
-			Truth:  truth.Question{Raw: truth.CrossToolDistinctCWECount, HDF: truth.Primary(truth.HDFDistinctCWECount)},
+			Truth: truth.Question{Raw: truth.CrossToolDistinctCWECount, HDF: truth.HDFDistinctCWECount},
 			Oracle: []OracleCall{
-				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "merged-gosec-zap-grype.hdf.json"}, "fields": []string{"cwe"}, "limit": 40, "page": 0}},
-				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "merged-gosec-zap-grype.hdf.json"}, "fields": []string{"cwe"}, "limit": 40, "page": 1}},
-				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "merged-gosec-zap-grype.hdf.json"}, "fields": []string{"cwe"}, "limit": 40, "page": 2}},
+				{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "fields": []string{"cwe"}, "limit": 40, "page": 0}},
+				{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "fields": []string{"cwe"}, "limit": 40, "page": 1}},
+				{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "fields": []string{"cwe"}, "limit": 40, "page": 2}},
 			},
 		},
-		// One scanner inside the merged document: the HDF arm must select the
-		// ZAP baselines (`owasp zap/*`) within one file; the raw arm must pick
-		// zap.json out of the three it is told about. Same fact as
-		// zap-high-severity-count, different regime — there the HDF arm was
-		// handed zap.hdf.json alone.
+		// One scanner inside the set: the HDF arm must select ZAP — by querying
+		// zap.hdf.json alone, or the `owasp zap/*` baselines of the combined
+		// view; the raw arm must pick zap.json out of the three it is told about.
+		// Same fact as zap-high-severity-count, different regime — there the HDF
+		// arm was handed zap.hdf.json alone.
 		{
-			ID:   "merged-zap-high-count",
+			ID:   "multi-zap-high-count",
 			Ask:  "Considering only the ZAP (DAST) scan, how many of its findings are high severity or above?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
@@ -314,16 +305,15 @@ func Bank() []Question {
 				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
 				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
 			},
-			Merged: "merged-gosec-zap-grype.hdf.json",
-			Truth:  truth.Question{Raw: truth.Nth(1, truth.ZapHighCount), HDF: truth.Primary(truth.HDFImpactCountAtLeastInBaselines("owasp zap/", 0.7))},
-			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "merged-gosec-zap-grype.hdf.json"}, "baseline": "owasp zap/*", "impact": ">=0.7", "limit": 1}}},
+			Truth:  truth.Question{Raw: truth.Nth(1, truth.ZapHighCount), HDF: truth.Nth(1, truth.HDFImpactCountAtLeast(0.7))},
+			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "baseline": "owasp zap/*", "impact": ">=0.7", "limit": 1}}},
 		},
 		// The cross-tool control-family rollup is HDF-native (Class C): no scanner
 		// output carries a NIST 800-53 mapping, so the family view exists only
-		// after normalization — and on a merged document it is one filtered call.
-		// The raw arm is measured on hallucinate-vs-abstain, as for every Class C.
+		// after normalization — and over the set it is one filtered call. The raw
+		// arm is measured on hallucinate-vs-abstain, as for every Class C.
 		{
-			ID:   "merged-nist-sc-failed-count",
+			ID:   "multi-nist-sc-failed-count",
 			Ask:  "Across the gosec (SAST), ZAP (DAST), and grype (vulnerability) scans together, how many failed requirements map to the NIST 800-53 SC (System and Communications Protection) control family?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
@@ -331,11 +321,16 @@ func Bank() []Question {
 				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
 				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
 			},
-			Merged: "merged-gosec-zap-grype.hdf.json",
-			Truth:  truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.Primary(truth.HDFFailedInNISTFamily("SC"))},
-			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "merged-gosec-zap-grype.hdf.json"}, "nist": []string{"SC-*"}, "status": []string{"failed"}, "limit": 1}}},
+			Truth:  truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.HDFFailedInNISTFamily("SC")},
+			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "nist": []string{"SC-*"}, "status": []string{"failed"}, "limit": 1}}},
 		},
 	}
+}
+
+// threeScanSources is the sources[] argument naming the three converted scans
+// under the run root, in the order the multi-* questions declare them.
+func threeScanSources() []map[string]any {
+	return []map[string]any{{"path": "gosec.hdf.json"}, {"path": "zap.hdf.json"}, {"path": "grype.hdf.json"}}
 }
 
 // key returns the fair grading key for an arm given the question's class and

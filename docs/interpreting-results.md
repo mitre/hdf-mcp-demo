@@ -63,30 +63,27 @@ often. Richer tools made the agent worse until the responses were trimmed.
 Both are reported because both are real workflows, and they can disagree
 substantially.
 
-## Merged-document questions
+## Multi-source questions
 
-The `merged-*` questions model a pipeline that has already combined several
-scanners' results into **one** HDF document with `hdf merge` (hdf-libs
-ADR-0016): one baseline per scanner run, named `<tool>/<original>` and labelled
-with `tool`, `toolVersion` and `sourceDocument`. The harness produces that
-document at staging time exactly as a pipeline would — every source is
-converted, then `hdf merge <sources> -o <merged>` runs through the shipped CLI
-— so it tracks the converters rather than a vendored artifact.
-`fixtures/merged-gosec-zap-grype.hdf.json` is a committed sample of the same
-output for inspection; a gated test regenerates it and fails if it drifts
-(timestamps aside — gosec output has none, so its conversion time is stamped).
+The `multi-*` questions ask one thing across three scanners' outputs — gosec
+(SAST), ZAP (DAST) and grype (vulnerability). The pipeline has produced one
+HDF document per scanner, and the **HDF arm** is told all three. The read tools
+take `sources[]` (hdf-libs ADR-0016 §7): the server combines the documents
+**in memory, per call**, one baseline per scanner named `<tool>/<original>`,
+so a cross-tool question can be one call over the set — or three calls, if the
+model does not reach for `sources[]`. Which it does is part of what is
+measured. No merged file exists anywhere; the pipeline keeps one document per
+scanner, which is what thresholds and amendments gate on. The **raw arm** is
+told the three raw scan files, as for any multi-document question — nothing
+about the set leaks into its prompt.
 
-The two arms see different things on purpose. The **HDF arm** is told only the
-merged document, so a cross-tool question is one document and, ideally, one
-call. The **raw arm** is told every raw scan file, as before — nothing about the
-merge leaks into its prompt. Ground truth follows the same split: the raw view
-is computed from the scan files, the HDF view from the merged document.
-
-Only the **pipeline** cost view exists for these questions. Merging is a
-deterministic pipeline step, deliberately *not* an MCP tool (ADR-0016 §7), so an
-agent cannot merge on demand; the ad-hoc column is blank for them and they are
-excluded from the ad-hoc totals. Running the bank therefore needs an `hdf`
-binary that has `hdf merge` (`HDF_BIN`, hdf-libs with ADR-0016).
+Ground truth follows the same split: the raw view is computed from the scan
+files, the HDF view from the three converted documents (a union for distinct
+CWEs, a sum for failed-in-family, the second document alone for the ZAP-only
+count). Both cost views exist: the ad-hoc arm is told to convert all three
+scans, then answer. The HDF arm's advantage here is one call over N documents,
+not one file. Running the bank needs an `hdf` binary whose read tools accept
+`sources[]` (`HDF_BIN`, hdf-libs with ADR-0016).
 
 ## The cost multiplier
 

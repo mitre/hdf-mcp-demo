@@ -196,8 +196,7 @@ func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB a
 	for _, src := range q.Sources {
 		rawDocs = append(rawDocs, rawBytes[src.Fixture])
 	}
-	// The HDF view is the per-source documents — or, for a merged-document
-	// question, the one document hdf merge produced from them.
+	// The HDF view is the per-source converted documents, in declaration order.
 	hdfDocs := make([][]byte, 0, len(q.Sources))
 	for _, name := range q.hdfNames() {
 		b, err := os.ReadFile(filepath.Join(root, name))
@@ -212,27 +211,60 @@ func runQuestion(ctx context.Context, inst instrument.Instrument, rawTB, mcpTB a
 	}
 
 	qr := QuestionResult{ID: q.ID, Ask: q.Ask, Class: cls.Class, RawView: cls.RawAnswer, HDFView: cls.HDFAnswer}
-	qr.Raw = runArm(ctx, inst, rawTB, ArmRaw, opts,
-		q.Ask+" "+fileClause("scan file", q.rawNames()),
+	qr.Raw = runArm(ctx, inst, rawTB, ArmRaw, opts, rawPrompt(q),
 		q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmRaw), q.Kind, q.ID+".raw")
 	hdfKey := q.key(cls.Class, cls.RawAnswer, cls.HDFAnswer, ArmHDF)
-	qr.HDF = runArm(ctx, inst, mcpTB, ArmHDF, opts,
-		q.Ask+" "+fileClause("HDF document", q.hdfNames()), hdfKey, q.Kind, q.ID+".hdf")
+	qr.HDF = runArm(ctx, inst, mcpTB, ArmHDF, opts, hdfPrompt(q), hdfKey, q.Kind, q.ID+".hdf")
 
-	// The ad-hoc view charges the agent for converting on demand. It does not
-	// exist for a merged-document question: merging is a pipeline step, not an
-	// MCP tool (ADR-0016 §7), so the only honest cost view is the pipeline one.
-	if adHocTB != nil && q.Merged == "" {
-		// A per-question output name keeps concurrent ad-hoc conversions from
-		// colliding in the shared root. The raw file is already staged.
-		out := q.ID + ".adhoc.hdf.json"
-		p := q.Primary()
-		ah := runArm(ctx, inst, adHocTB, ArmHDF, opts,
-			fmt.Sprintf("%s The raw scan file is named %s. First convert it to HDF using hdf_convert with from=%s and output=%s, then analyze that HDF document.",
-				q.Ask, p.Fixture, p.From, out), hdfKey, q.Kind, q.ID+".adhoc")
+	// The ad-hoc view charges the agent for converting on demand.
+	if adHocTB != nil {
+		ah := runArm(ctx, inst, adHocTB, ArmHDF, opts, adHocPrompt(q), hdfKey, q.Kind, q.ID+".adhoc")
 		qr.HDFAdHoc = &ah
 	}
 	return qr, nil
+}
+
+// adHocPrompt is the conversion-included prompt: the question plus the
+// instruction to convert the raw scans first. A single hdf_convert-able source
+// keeps the wording every earlier run used. A question whose sources are all
+// hdf_convert-able names every one of them, each with its own from and output —
+// a multi-scanner question cannot be answered from one converted document. A
+// source normalized outside hdf_convert (CLIPrep) is not something the agent can
+// convert, so such a question keeps the primary-only wording. Per-question
+// output names keep concurrent ad-hoc conversions from colliding in the shared
+// root; the raw files are already staged.
+func adHocPrompt(q Question) string {
+	convertible := len(q.Sources) > 1
+	for _, s := range q.Sources {
+		if s.From == "" || len(s.CLIPrep) > 0 {
+			convertible = false
+		}
+	}
+	if !convertible {
+		p := q.Primary()
+		return fmt.Sprintf("%s The raw scan file is named %s. First convert it to HDF using hdf_convert with from=%s and output=%s, then analyze that HDF document.",
+			q.Ask, p.Fixture, p.From, q.ID+".adhoc.hdf.json")
+	}
+	parts := make([]string, 0, len(q.Sources))
+	for _, s := range q.Sources {
+		parts = append(parts, fmt.Sprintf("%s (from=%s, output=%s.adhoc.%s)", s.Fixture, s.From, q.ID, s.HDFName))
+	}
+	return fmt.Sprintf("%s The raw scan files are: %s. First convert each one to HDF using hdf_convert with the given from and output, then analyze those HDF documents together.",
+		q.Ask, strings.Join(parts, "; "))
+}
+
+// rawPrompt and hdfPrompt are the two arms' prompts: the question plus the
+// files that arm may read — every raw scan for the raw arm, every converted
+// document for the HDF arm — and nothing else. The raw arm is never told that
+// the documents form a set, that they could be combined, or what the HDF arm
+// sees; the HDF arm is never told about the raw files. The split is the
+// measurement, so both are pinned by test.
+func rawPrompt(q Question) string {
+	return q.Ask + " " + fileClause("scan file", q.rawNames())
+}
+
+func hdfPrompt(q Question) string {
+	return q.Ask + " " + fileClause("HDF document", q.hdfNames())
 }
 
 // fileClause names the documents an arm may read, singular or plural, so a
@@ -375,75 +407,7 @@ func stageAndConvert(ctx context.Context, sess *mcpclient.Session, bin, fixtures
 			}
 		}
 	}
-	// Merged documents come last, once every source they combine is normalized.
-	// One merge per distinct output name: several questions share one merged
-	// document exactly as several questions share one fixture — and must
-	// therefore agree on what goes into it.
-	groups, err := mergedGroups(bank)
-	if err != nil {
-		return nil, err
-	}
-	for _, q := range groups {
-		if err := mergeStaged(ctx, bin, root, q); err != nil {
-			return nil, fmt.Errorf("merge %s: %w", q.Merged, err)
-		}
-	}
 	return raw, nil
-}
-
-// mergedGroups returns one representative question per merged document name,
-// in bank order, refusing a bank in which two questions name the same merged
-// document but declare different sources: the first would silently define the
-// document the second is graded against.
-func mergedGroups(bank []Question) ([]Question, error) {
-	var out []Question
-	first := map[string]Question{}
-	for _, q := range bank {
-		if q.Merged == "" {
-			continue
-		}
-		if prev, seen := first[q.Merged]; seen {
-			if !sameSources(prev.Sources, q.Sources) {
-				return nil, fmt.Errorf("questions %s and %s both merge into %s but from different sources", prev.ID, q.ID, q.Merged)
-			}
-			continue
-		}
-		first[q.Merged] = q
-		out = append(out, q)
-	}
-	return out, nil
-}
-
-func sameSources(a, b []Source) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Fixture != b[i].Fixture || a[i].HDFName != b[i].HDFName {
-			return false
-		}
-	}
-	return true
-}
-
-// mergeStaged combines a question's normalized documents into its merged
-// document through the shipped hdf CLI — `hdf merge <sources> -o <Merged>` —
-// the same command a pipeline runs (ADR-0016). Deterministic: the same inputs
-// in the same order produce the same bytes, so a reused root is idempotent.
-func mergeStaged(ctx context.Context, bin, root string, q Question) error {
-	if bin == "" {
-		return fmt.Errorf("%s needs the hdf CLI (hdf merge) but no binary path was supplied", q.Merged)
-	}
-	args := []string{"merge"}
-	for _, src := range q.Sources {
-		args = append(args, filepath.Join(root, src.HDFName))
-	}
-	args = append(args, "-o", filepath.Join(root, q.Merged))
-	cmd := exec.CommandContext(ctx, bin, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("hdf %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // normalize turns one staged raw fixture into its HDF document, either through
