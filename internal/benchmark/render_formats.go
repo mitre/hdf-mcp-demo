@@ -29,6 +29,10 @@ type RunMeta struct {
 	Repeat      int
 	Temperature float64
 	NumCtx      int // ollama only: the context window the run was given; 0 = provider default
+	// Questions is the -questions file the run's prompts came from; empty means
+	// the built-in set. A reworded or reduced bank changes what every number
+	// means, so an artifact must say which one it measured.
+	Questions string
 	// ModelProvenance names, per model, the two documents a run emits beside the
 	// report so it records WHICH weights produced it rather than only a tag.
 	ModelProvenance []ModelProvenance
@@ -57,8 +61,8 @@ func MetaText(m RunMeta) string {
 	if len(m.Models) > 0 {
 		fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
 	}
-	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s%s\n",
-		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature), numCtxStr(m.NumCtx, " "))
+	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s%s%s\n",
+		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature), numCtxStr(m.NumCtx, " "), questionsStr(m.Questions, " "))
 	if m.Provider != "" {
 		fmt.Fprintf(&b, "  cost:      %s\n", chargeStatement(m.Provider))
 	}
@@ -76,6 +80,15 @@ func numCtxStr(n int, sep string) string {
 		return ""
 	}
 	return fmt.Sprintf("%snum-ctx=%d", sep, n)
+}
+
+// questionsStr names a custom -questions file in the settings line, and nothing
+// when the run used the built-in set — the common case needs no annotation.
+func questionsStr(path, sep string) string {
+	if path == "" {
+		return ""
+	}
+	return fmt.Sprintf("%squestions=%s", sep, path)
 }
 
 // chargeStatement records what the run cost externally. The study's
@@ -123,6 +136,7 @@ type jsonMeta struct {
 	Repeat          int              `json:"repeat"`
 	Temperature     float64          `json:"temperature"`
 	NumCtx          int              `json:"numCtx,omitempty"`
+	Questions       string           `json:"questions,omitempty"`
 	Cost            string           `json:"costStatement,omitempty"`
 	ModelProvenance []jsonProvenance `json:"modelProvenance,omitempty"`
 }
@@ -266,7 +280,7 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) (strin
 	report := jsonReport{Meta: jsonMeta{
 		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
-		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx,
+		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx, Questions: meta.Questions,
 		Cost: chargeStatement(meta.Provider), ModelProvenance: toJSONProvenance(meta.ModelProvenance),
 	}}
 	for _, b := range bks {
@@ -361,8 +375,8 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 		fmt.Fprintf(&b, "- **provider:** %s\n", meta.Provider)
 	}
 	fmt.Fprintf(&b, "- **models:** %s\n", strings.Join(meta.Models, ", "))
-	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s%s\n",
-		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature), numCtxStr(meta.NumCtx, ", "))
+	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s%s%s\n",
+		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature), numCtxStr(meta.NumCtx, ", "), questionsStr(meta.Questions, ", "))
 	if meta.Provider != "" {
 		fmt.Fprintf(&b, "- **cost:** %s\n", chargeStatement(meta.Provider))
 	}

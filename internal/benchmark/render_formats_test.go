@@ -430,3 +430,35 @@ func TestMultSuppressedWhenAnArmDidNotAnswer(t *testing.T) {
 		})
 	}
 }
+
+// TestMetaQuestions checks a custom -questions file is recorded in every format,
+// and that the built-in set adds nothing: a reduced or reworded bank changes what
+// the numbers mean, so an artifact must name it.
+func TestMetaQuestions(t *testing.T) {
+	set := RunMeta{Models: []string{"m"}, Questions: "my-questions.md"}
+	if got := MetaText(set); !strings.Contains(got, "questions=my-questions.md") {
+		t.Errorf("MetaText omitted questions:\n%s", got)
+	}
+	if got := RenderMarkdown(set, nil, false, nil); !strings.Contains(got, "questions=my-questions.md") {
+		t.Errorf("RenderMarkdown omitted questions:\n%s", got)
+	}
+	js, err := RenderJSON(set, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js, `"questions": "my-questions.md"`) {
+		t.Errorf("RenderJSON omitted questions:\n%s", js)
+	}
+
+	unset := RunMeta{Models: []string{"m"}}
+	if got := MetaText(unset); strings.Contains(got, "questions=") {
+		t.Errorf("MetaText annotated the built-in set:\n%s", got)
+	}
+	js, err = RenderJSON(unset, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(js, `"questions"`) {
+		t.Errorf("RenderJSON annotated the built-in set:\n%s", js)
+	}
+}

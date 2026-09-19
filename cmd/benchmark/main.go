@@ -58,6 +58,7 @@ func main() {
 	numCtx := flag.Int("numctx", 32768, "ollama only: context window (num_ctx). Ollama's own default is 4096 whatever the model advertises, and it truncates silently — too small for the raw-file arm, so leaving it unset understates raw. 0 = defer to the server")
 	bookendsOnly := flag.Bool("bookends", false, "compute only the model-free token bookends (whole-file ceiling + hand-optimal oracle per question) and exit — needs no model, endpoint, or provider")
 	transcripts := flag.String("transcripts", "", "write one JSON transcript per (question, arm, sample) under this directory — every prompt, tool definition, tool call, and the graded outcome — for diagnosing a failing or abstaining arm from evidence")
+	questions := flag.String("questions", "", "markdown file of question prompts, keyed by question ID, that replaces the built-in set: which questions run, in what order, and their wording. Copy "+benchmark.DefaultQuestionsFile+" and edit it; the IDs bind each prompt to its ground truth, so they must be kept")
 	flag.Parse()
 
 	cfg := runConfig{
@@ -65,7 +66,7 @@ func main() {
 		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
 		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
 		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider), numCtx: *numCtx,
-		bookendsOnly: *bookendsOnly, transcripts: *transcripts,
+		bookendsOnly: *bookendsOnly, transcripts: *transcripts, questions: *questions,
 		toolset: splitModels(*toolset),
 	}
 	if cfg.concurrency <= 0 {
@@ -94,7 +95,17 @@ type runConfig struct {
 	numCtx            int
 	bookendsOnly      bool
 	transcripts       string
+	questions         string   // -questions file; empty = the built-in questions.md
 	toolset           []string // advertised HDF tools; empty = the full read surface
+}
+
+// loadBank returns the run's question set: the built-in bank, or the file
+// named by -questions, which defines both the set and the wording.
+func loadBank(path string) ([]benchmark.Question, error) {
+	if path == "" {
+		return benchmark.Bank(), nil
+	}
+	return benchmark.LoadBank(path)
 }
 
 // endpoint resolves the provider's base URL. For ollama it is optional (the
@@ -401,6 +412,10 @@ func run(cfg runConfig) error {
 	if err != nil {
 		return err
 	}
+	bank, err := loadBank(cfg.questions)
+	if err != nil {
+		return err
+	}
 
 	baseRoot, err := os.MkdirTemp("", "hdf-mcp-demo-bench-")
 	if err != nil {
@@ -411,7 +426,6 @@ func run(cfg runConfig) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
 	defer cancel()
 
-	bank := benchmark.Bank()
 	opts := benchmark.Options{MaxIters: cfg.maxIters, AdHoc: cfg.adhoc, Concurrency: cfg.concurrency, Repeat: cfg.repeat, TranscriptDir: cfg.transcripts}
 	// Liveness: report each question as it finishes (to stderr, so stdout stays
 	// clean for -format json/markdown), so a long run visibly isn't hung.
@@ -425,13 +439,18 @@ func run(cfg runConfig) error {
 	if shownBase == "" && cfg.provider == "ollama" {
 		shownBase = instrument.DefaultOllamaURL + " (default)"
 	}
-	fmt.Fprintf(os.Stderr, "provider: %s   endpoint: %s   hdf: %s\nmodels: %s   questions: %d   concurrency: %d   ad-hoc: %v   format: %s\n\n",
-		cfg.provider, shownBase, bin, strings.Join(models, ", "), len(bank), cfg.concurrency, cfg.adhoc, cfg.format)
+	questionSource := "built-in"
+	if cfg.questions != "" {
+		questionSource = cfg.questions
+	}
+	fmt.Fprintf(os.Stderr, "provider: %s   endpoint: %s   hdf: %s\nmodels: %s   questions: %d (%s)   concurrency: %d   ad-hoc: %v   format: %s\n\n",
+		cfg.provider, shownBase, bin, strings.Join(models, ", "), len(bank), questionSource, cfg.concurrency, cfg.adhoc, cfg.format)
 
 	meta := benchmark.RunMeta{
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Provider: cfg.provider, Models: models,
 		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
 		Repeat: cfg.repeat, Temperature: cfg.temperature, NumCtx: metaNumCtx(cfg),
+		Questions:       cfg.questions,
 		ModelProvenance: writeModelBOMs(ctx, cfg, bin, models),
 	}
 
@@ -439,7 +458,7 @@ func run(cfg runConfig) error {
 	// oracle per question), computed once per run in its own root — they depend on
 	// the fixtures and the tool surface, not on any model.
 	fmt.Fprintln(os.Stderr, "computing token bookends (model-free)...")
-	bks, err := computeBookends(ctx, cfg, bin, baseRoot)
+	bks, err := computeBookends(ctx, cfg, bin, baseRoot, bank)
 	if err != nil {
 		return fmt.Errorf("compute bookends: %w", err)
 	}
@@ -494,7 +513,7 @@ func run(cfg runConfig) error {
 
 // computeBookends runs the model-free bookend pass in its own root and MCP
 // session (the per-model roots are created later and torn down independently).
-func computeBookends(ctx context.Context, cfg runConfig, bin, baseRoot string) ([]benchmark.Bookend, error) {
+func computeBookends(ctx context.Context, cfg runConfig, bin, baseRoot string, bank []benchmark.Question) ([]benchmark.Bookend, error) {
 	root, err := os.MkdirTemp(baseRoot, "bookends-")
 	if err != nil {
 		return nil, err
@@ -505,7 +524,7 @@ func computeBookends(ctx context.Context, cfg runConfig, bin, baseRoot string) (
 		return nil, err
 	}
 	defer func() { _ = sess.Close() }()
-	return benchmark.ComputeBookends(ctx, sess, bin, cfg.fixturesDir, root, benchmark.Bank())
+	return benchmark.ComputeBookends(ctx, sess, bin, cfg.fixturesDir, root, bank)
 }
 
 // runModel gives one model its own MCP server process and its own document root,

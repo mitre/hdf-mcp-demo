@@ -134,6 +134,8 @@ Results land in `results/` as markdown. `cmd/benchmark` is also usable directly 
 
 One constraint shapes the whole bank: every question's ground truth must be **computable from the data by code** — once over the raw scanner output, once over the converted HDF document — never asserted by hand and never judged by an LLM. That limits the bank to question shapes with closed-form answers (counts, existence, thresholds, rates), which is also why there are fourteen questions and not fifty. Where the two computed answers agree, the question is *objective*; where they legitimately differ, it is *interpretive* and graded to its stated intent; where only one view can express an answer at all, it is *hdf-only*. The classification is recomputed from the data at run time, so a converter change that altered the semantics would reclassify the question rather than silently grade against a stale key.
 
+The wording of every question is text, not code: [`questions.md`](questions.md) holds the prompts, keyed by the IDs below, and `-questions FILE` runs a copy of it — reworded, reordered, or reduced. What each ID *means* (its sources, grading class, and the code that computes its answer) stays in `questions.go`, so a reworded prompt is still graded against the same key.
+
 | Question | Asks | Type | Why it is in the bank |
 |---|---|---|---|
 | `gosec-distinct-rules` | distinct rule violations in the gosec scan | interpretive (key = 3, the HDF view) | gosec emits one finding per code site; conversion dedups to rule level (7 findings → 3 rules). Asking for *distinct rules* matches HDF's shape — the raw arm must dedup by hand. |
@@ -194,6 +196,7 @@ Leave headroom: the context window costs memory on top of the weights, and each 
 | `-format` | `text`, `json`, or `markdown` — for a saved, self-describing artifact. |
 | `-adhoc` | Also measure the conversion-included cost view, rather than assuming documents are already normalized. |
 | `-transcripts` | Write one JSON transcript per question/arm/sample (every prompt, tool definition, tool call, and the graded outcome) into this directory — the evidence trail for diagnosing an arm that fails or abstains. |
+| `-questions` | A markdown file of prompts, keyed by question ID, that replaces the built-in set — which questions run, in what order, and how they are worded. Copy [`questions.md`](questions.md) and edit it; the IDs bind each prompt to its computed ground truth, so they must be kept. The report's settings line records the file. |
 
 ## Published runs
 

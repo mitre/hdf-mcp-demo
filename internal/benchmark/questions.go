@@ -43,7 +43,7 @@ type OracleCall struct {
 
 type Question struct {
 	ID      string
-	Ask     string   // natural-language question; the harness appends the file names per arm
+	Ask     string   // natural-language prompt, bound from questions.md by ID; the harness appends the file names per arm
 	Sources []Source // documents the question reads, in the order both arms are told about them
 	Kind    Kind
 	Intent  IntentView // Class B only
@@ -81,9 +81,13 @@ func (q Question) hdfNames() []string {
 	return out
 }
 
-// Bank is the vetted question set (ADR-0002 Phase 3c). It spans all three classes
-// and — critically — carries the Class-B gosec count in BOTH directions so the
-// study never reports only the HDF-flattering side:
+// skeleton is the vetted question set (ADR-0002 Phase 3c) minus its wording:
+// everything that binds a question to its ground truth — sources, kind, intent,
+// truth functions, oracle — keyed by ID. The prompt text lives in questions.md
+// and is bound by Bank / BankFrom, so the human-written half of the study is
+// editable as text while the answer keys stay in code. The set spans all three
+// classes and — critically — carries the Class-B gosec count in BOTH directions
+// so the study never reports only the HDF-flattering side:
 //
 //   - gosec-distinct-rules  (B, intent=HDF): "distinct rule violations" → key 3;
 //     HDF wins, the raw arm must manually deduplicate.
@@ -97,12 +101,11 @@ func (q Question) hdfNames() []string {
 //   - inspec-control-count / inspec-compliance-rate (A): the same two shapes over a
 //     1.2MB compliance run — the large-document regime, where the raw arm must
 //     actually work to find what a bounded HDF response returns directly.
-func Bank() []Question {
+func skeleton() []Question {
 	gosecTruth := truth.Question{Raw: truth.Primary(truth.GosecFindingCount), HDF: truth.Primary(truth.HDFRequirementCount)}
 	return []Question{
 		{
 			ID:   "gosec-distinct-rules",
-			Ask:  "How many DISTINCT rule violations (unique rule IDs) are in the gosec SAST scan?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
 			Truth:   gosecTruth,
@@ -110,7 +113,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "gosec-total-findings",
-			Ask:  "How many total findings did the gosec SAST scanner emit (the raw count of individual finding entries, before any de-duplication)?",
 			Kind: KindCount, Intent: IntentRaw,
 			Sources:           []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
 			Truth:             gosecTruth,
@@ -118,7 +120,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "grype-match-count",
-			Ask:  "How many vulnerability matches are in the grype scan?",
 			Kind: KindCount, Intent: IntentHDF, // A: both views agree, intent is moot
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeMatchCount), HDF: truth.Primary(truth.HDFRequirementCount)},
@@ -126,7 +127,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "grype-cve-present",
-			Ask:  "Is CVE-2021-36159 present in the grype scan? Answer yes or no.",
 			Kind: KindBool, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeCVEPresent("CVE-2021-36159")), HDF: truth.Primary(truth.HDFRequirementPresent("CVE-2021-36159"))},
@@ -136,7 +136,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "grype-compliance-rate",
-			Ask:  "What percentage of the grype scan is passing (the compliance pass rate)? Answer with a whole-number percentage.",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.Primary(truth.HDFComplianceRate)},
@@ -144,7 +143,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "grype-has-critical",
-			Ask:  "Does the grype scan contain any Critical-severity finding? Answer yes or no.",
 			Kind: KindBool, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeSeverityPresent("Critical")), HDF: truth.Primary(truth.HDFImpactPresentAtLeast(0.9))},
@@ -157,7 +155,6 @@ func Bank() []Question {
 		// surface or fail. Graded, not excused: see HDFRelatedVulnCountFromCode.
 		{
 			ID:   "grype-related-vulns",
-			Ask:  "How many vulnerability matches in the grype scan list at least one related vulnerability?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources:           []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
 			Truth:             truth.Question{Raw: truth.Primary(truth.GrypeRelatedVulnCount), HDF: truth.Primary(truth.HDFRelatedVulnCountFromCode)},
@@ -165,7 +162,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "zap-alert-count",
-			Ask:  "How many alerts are in the ZAP (DAST) scan?",
 			Kind: KindCount, Intent: IntentHDF, // A: ZAP does not dedup, so raw==HDF
 			Sources: []Source{{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.ZapAlertCount), HDF: truth.Primary(truth.HDFRequirementCount)},
@@ -178,7 +174,6 @@ func Bank() []Question {
 		// both views agree and the comparison stays apples-to-apples.
 		{
 			ID:   "inspec-control-count",
-			Ask:  "How many controls are in the InSpec compliance run?",
 			Kind: KindCount, Intent: IntentHDF, // A: InSpec is rule-shaped already, so raw==HDF
 			Sources: []Source{{Fixture: "inspec.json", From: "hdf", HDFName: "inspec.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.InspecControlCount), HDF: truth.Primary(truth.HDFRequirementCount)},
@@ -186,7 +181,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "inspec-compliance-rate",
-			Ask:  "What percentage of the InSpec compliance run is passing (the pass rate over all test results)? Answer with a whole-number percentage.",
 			Kind: KindCount, Intent: IntentHDF, // A: a compliance run states pass/fail natively
 			Sources: []Source{{Fixture: "inspec.json", From: "hdf", HDFName: "inspec.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.InspecComplianceRate), HDF: truth.Primary(truth.HDFComplianceRate)},
@@ -194,7 +188,6 @@ func Bank() []Question {
 		},
 		{
 			ID:   "zap-high-severity-count",
-			Ask:  "How many high-risk alerts are in the ZAP scan?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"}},
 			Truth:   truth.Question{Raw: truth.Primary(truth.ZapHighCount), HDF: truth.Primary(truth.HDFImpactCountAtLeast(0.7))},
@@ -210,7 +203,6 @@ func Bank() []Question {
 		// band alignment.
 		{
 			ID:   "cross-format-high-count",
-			Ask:  "Across the gosec (SAST), ZAP (DAST), and grype (vulnerability) scans together, how many findings are high severity or above?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
 				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
@@ -230,9 +222,7 @@ func Bank() []Question {
 		// match per package instance, so an instance-level diff reports churn for
 		// CVEs that persist across version bumps.
 		{
-			ID: "grype-fixed-vulns",
-			Ask: "Two grype scans of the same container image are provided: the FIRST named file is the previous scan and the SECOND is the current scan. " +
-				"How many DISTINCT vulnerability IDs from the previous scan are no longer present in the current scan?",
+			ID:   "grype-fixed-vulns",
 			Kind: KindCount, Intent: IntentHDF, // A: requirement IDs are the vulnerability IDs
 			Sources: []Source{
 				{Fixture: "grype-alpine311.json", From: "grype", HDFName: "grype-alpine311.hdf.json"},
@@ -248,9 +238,7 @@ func Bank() []Question {
 		// actually join two files; the HDF arm is out of remit and is measured on
 		// hallucinate-vs-abstain.
 		{
-			ID: "sbom-vuln-free-packages",
-			Ask: "An SPDX SBOM inventories every package of the same container image the grype scan covers: the FIRST named file is the vulnerability scan and the SECOND is the SBOM. " +
-				"How many of the SBOM's packages have NO vulnerability matches in the grype scan?",
+			ID:   "sbom-vuln-free-packages",
 			Kind: KindCount, Intent: IntentRaw, // D: only the raw view holds the join key
 			Sources: []Source{
 				{Fixture: "grype-alpine312.json", From: "grype", HDFName: "grype-alpine312.hdf.json"},
@@ -277,7 +265,6 @@ func Bank() []Question {
 		// (3 pages of 40 cover 120 rows).
 		{
 			ID:   "multi-distinct-cwe-count",
-			Ask:  "How many DISTINCT CWE IDs are referenced across the gosec (SAST), ZAP (DAST), and grype (vulnerability) scans together? Count a weakness once no matter how many findings cite it.",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
 				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
@@ -298,7 +285,6 @@ func Bank() []Question {
 		// arm was handed zap.hdf.json alone.
 		{
 			ID:   "multi-zap-high-count",
-			Ask:  "Considering only the ZAP (DAST) scan, how many of its findings are high severity or above?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
 				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
@@ -314,7 +300,6 @@ func Bank() []Question {
 		// arm is measured on hallucinate-vs-abstain, as for every Class C.
 		{
 			ID:   "multi-nist-sc-failed-count",
-			Ask:  "Across the gosec (SAST), ZAP (DAST), and grype (vulnerability) scans together, how many failed requirements map to the NIST 800-53 SC (System and Communications Protection) control family?",
 			Kind: KindCount, Intent: IntentHDF,
 			Sources: []Source{
 				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
