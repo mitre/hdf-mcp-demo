@@ -60,6 +60,10 @@ func main() {
 	transcripts := flag.String("transcripts", "", "write one JSON transcript per (question, arm, sample) under this directory — every prompt, tool definition, tool call, and the graded outcome — for diagnosing a failing or abstaining arm from evidence")
 	questions := flag.String("questions", "", "markdown file of question prompts, keyed by question ID, that replaces the built-in set: which questions run, in what order, and their wording. Copy "+benchmark.DefaultQuestionsFile+" and edit it; the IDs bind each prompt to its ground truth, so they must be kept")
 	flag.Parse()
+	if err := rejectPositional(flag.Args()); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
 
 	cfg := runConfig{
 		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
@@ -97,6 +101,19 @@ type runConfig struct {
 	transcripts       string
 	questions         string   // -questions file; empty = the built-in questions.md
 	toolset           []string // advertised HDF tools; empty = the full read surface
+}
+
+// rejectPositional refuses arguments the flag package left unparsed. Go stops
+// reading flags at the first non-flag argument, so a typo such as
+// `-transcripts -maxiters 12` — where -maxiters becomes the transcript
+// directory and 12 ends the flags — silently runs every later flag at its
+// default. That cost a multi-hour study once; it is an error at the boundary now.
+func rejectPositional(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected argument %q: flag parsing stops at the first non-flag argument, so every flag after it was ignored — "+
+		"check that each flag has its value (a flag taking a value will consume the next word, even another flag)", args[0])
 }
 
 // loadBank returns the run's question set: the built-in bank, or the file

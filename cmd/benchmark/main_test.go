@@ -127,3 +127,22 @@ func TestDefaultPerModel(t *testing.T) {
 		t.Error("overall auto timeout is smaller than the sum of per-model allowances")
 	}
 }
+
+// TestRejectPositional pins the boundary check for the flag-swallowing case: a
+// value-taking flag given no value eats the next flag, and the word after that
+// becomes a positional argument that silently ends flag parsing. The error must
+// name the argument and say why it is fatal.
+func TestRejectPositional(t *testing.T) {
+	if err := rejectPositional(nil); err != nil {
+		t.Errorf("no positional args must pass: %v", err)
+	}
+	err := rejectPositional([]string{"12", "-model-timeout", "90m"})
+	if err == nil {
+		t.Fatal("expected an error for a positional argument")
+	}
+	for _, want := range []string{`"12"`, "ignored"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %s: %v", want, err)
+		}
+	}
+}
