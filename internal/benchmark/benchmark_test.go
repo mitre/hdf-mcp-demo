@@ -163,3 +163,18 @@ func TestRunArm_FailureIsRecorded(t *testing.T) {
 		t.Error("expected the error to be captured on the ArmResult")
 	}
 }
+
+// TestDefaultMaxItersIsShared guards the drift the AC review caught: the CLI
+// flag default and the library fallback were set independently, so raising one
+// silently left a library caller on the old cap.
+func TestDefaultMaxItersIsShared(t *testing.T) {
+	if got := (Options{}).maxIters(); got != DefaultMaxIters {
+		t.Errorf("unset Options must use DefaultMaxIters, got %d want %d", got, DefaultMaxIters)
+	}
+	if DefaultMaxIters < 10 {
+		t.Errorf("DefaultMaxIters=%d is below the range the observed iteration distribution justified", DefaultMaxIters)
+	}
+	if got := (Options{MaxIters: 3}).maxIters(); got != 3 {
+		t.Errorf("explicit MaxIters must win, got %d", got)
+	}
+}

@@ -9,14 +9,18 @@ import (
 	"github.com/mitre/hdf-mcp-demo/internal/tok"
 )
 
-// ReadTools is the realistic read/analysis surface a querying agent needs. The
-// write tools (hdf_author, hdf_apply_amendment) and hdf_convert are excluded: the
-// HDF arm operates on already-normalized documents (the amortized pipeline case).
+// ReadTools is the realistic read/analysis surface a querying agent needs — the
+// server's own "read" profile, pinned by TestReadTools_MatchesServerReadProfile
+// so a tool added upstream cannot go unadvertised (and so unmeasured). The write
+// tools (hdf_author, hdf_apply_amendment) and hdf_convert are excluded by that
+// profile: the HDF arm operates on already-normalized documents (the amortized
+// pipeline case).
 var ReadTools = map[string]bool{
 	"hdf_open":       true,
 	"hdf_inspect":    true,
 	"hdf_query":      true,
 	"hdf_compliance": true,
+	"hdf_aggregate":  true,
 	"hdf_diff":       true,
 	"hdf_validate":   true,
 }

@@ -60,6 +60,7 @@ go test ./...                      # the suite (set HDF_BIN, or put hdf on PATH)
 | Structure/metadata (counts, components, inventories) | `hdf_inspect` |
 | The requirements themselves (filter by status/severity/id/tag) | `hdf_query` |
 | Compliance % + status/severity rollups + threshold verdict | `hdf_compliance` |
+| One rollup spanning several documents at once | `hdf_aggregate` |
 | What changed between two documents | `hdf_diff` |
 
 **5. Reads degrade, writes refuse.** A structurally-valid but schema-imperfect document still opens (`valid:false` + best-effort summary); a write tool refuses to emit a document that does not validate. Writes are gated by `HDF_MCP_ENABLE_WRITES` (off by default) — a disabled deployment returns a preview, never a silent no-op.
