@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -330,7 +331,7 @@ func checkOllamaModels(ctx context.Context, base string, models []string) error 
 		if len(avail) > 0 {
 			msg += "\n\ntool-capable models already pulled: " + strings.Join(avail, ", ")
 		}
-		return fmt.Errorf("%s", msg)
+		return errors.New(msg)
 	}
 	return nil
 }

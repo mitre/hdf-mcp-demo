@@ -504,3 +504,18 @@ func TestNoIterationCapCaveatWhenUnbound(t *testing.T) {
 		t.Errorf("unbound run must not carry the cap caveat:\n%s", md)
 	}
 }
+
+// TestToJSONProvenance_MirrorsModelProvenance pins that the JSON provenance
+// record carries exactly the report's fields, so the two types can be converted
+// rather than copied field by field, and a field added to one cannot be
+// silently dropped from the artifact.
+func TestToJSONProvenance_MirrorsModelProvenance(t *testing.T) {
+	got := toJSONProvenance([]ModelProvenance{{Model: "m:1", BOM: "m_1.model.cdx.json", System: "m_1.model.system.json"}})
+	want := []jsonProvenance{{Model: "m:1", BOM: "m_1.model.cdx.json", System: "m_1.model.system.json"}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("toJSONProvenance = %+v, want %+v", got, want)
+	}
+	if toJSONProvenance(nil) != nil {
+		t.Error("no provenance must convert to nil, so the JSON key is omitted")
+	}
+}

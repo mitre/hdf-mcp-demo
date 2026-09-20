@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -142,19 +143,19 @@ func parseBool(s string) (bool, bool) {
 	// Negated phrasings embed their own positive word ("not present" contains
 	// "present"), so consume them first and search what remains for affirmations.
 	neg := false
-	for _, p := range []string{"not present", "not found", "not detected", "isn't", "is not"} {
+	for _, p := range negatedPhrases {
 		if strings.Contains(l, p) {
 			neg = true
 			l = strings.ReplaceAll(l, p, " ")
 		}
 	}
-	for _, w := range []string{"no", "false", "absent"} {
+	for _, w := range negativeWords {
 		if containsWord(l, w) {
 			neg = true
 		}
 	}
 	pos := false
-	for _, w := range []string{"yes", "true", "present", "found"} {
+	for _, w := range positiveWords {
 		if containsWord(l, w) {
 			pos = true
 		}
@@ -171,7 +172,40 @@ func parseBool(s string) (bool, bool) {
 	return false, false
 }
 
-// containsWord reports whether word appears as a whole word in s.
+// The vocabulary parseBool reads. Negated phrases embed their own positive word
+// and are consumed first; the single words are matched whole, via patterns
+// compiled once below — grading runs once per sample per arm, and compiling
+// seven regexps per reply was pure waste on that loop.
+var (
+	negatedPhrases = []string{"not present", "not found", "not detected", "isn't", "is not"}
+	negativeWords  = []string{"no", "false", "absent"}
+	positiveWords  = []string{"yes", "true", "present", "found"}
+	wordRE         = compileWords(negativeWords, positiveWords)
+)
+
+// compileWords builds the whole-word pattern for every word in the lists.
+func compileWords(lists ...[]string) map[string]*regexp.Regexp {
+	m := map[string]*regexp.Regexp{}
+	for _, l := range lists {
+		for _, w := range l {
+			m[w] = wordPattern(w)
+		}
+	}
+	return m
+}
+
+func wordPattern(word string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+}
+
+// containsWord reports whether word appears as a whole word in s. Only the
+// grading vocabulary above is accepted: there is deliberately no compile-on-miss
+// fallback, so a per-call compile cannot creep back in — a word outside the
+// tables is a programming error and says so.
 func containsWord(s, word string) bool {
-	return regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`).MatchString(s)
+	re, ok := wordRE[word]
+	if !ok {
+		panic(fmt.Sprintf("containsWord: %q is not in the grading vocabulary", word))
+	}
+	return re.MatchString(s)
 }

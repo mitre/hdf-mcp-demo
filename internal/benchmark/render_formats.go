@@ -110,7 +110,7 @@ func toJSONProvenance(in []ModelProvenance) []jsonProvenance {
 	}
 	out := make([]jsonProvenance, 0, len(in))
 	for _, p := range in {
-		out = append(out, jsonProvenance{Model: p.Model, BOM: p.BOM, System: p.System})
+		out = append(out, jsonProvenance(p))
 	}
 	return out
 }

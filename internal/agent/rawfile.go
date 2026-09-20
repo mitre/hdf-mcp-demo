@@ -210,11 +210,9 @@ func searchFile(content, query string, maxResults int, useRegex bool) (string, e
 		// minified case, where a "line" can be hundreds of thousands of
 		// characters) does the window become the limit.
 		lineLo := strings.LastIndexByte(content[:loc[0]], '\n') + 1
-		lineHi := loc[1]
+		lineHi := len(content)
 		if nl := strings.IndexByte(content[loc[1]:], '\n'); nl >= 0 {
 			lineHi = loc[1] + nl
-		} else {
-			lineHi = len(content)
 		}
 		lo := max(lineLo, loc[0]-matchWindow)
 		hi := min(lineHi, loc[1]+matchWindow)

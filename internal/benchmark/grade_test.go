@@ -171,3 +171,44 @@ func TestGrade_NegationsStillNegative(t *testing.T) {
 		}
 	}
 }
+
+// TestContainsWord pins whole-word matching before the implementation stops
+// compiling a pattern per call: a word must not match inside a longer word, and
+// punctuation is a boundary.
+func TestContainsWord(t *testing.T) {
+	for _, tc := range []struct {
+		s, word string
+		want    bool
+	}{
+		{"no", "no", true},
+		{"not present", "no", false},
+		{"the answer is no.", "no", true},
+		{"nobody knows", "no", false},
+		{"yes, it is present", "present", true},
+		{"presently", "present", false},
+		{"", "yes", false},
+	} {
+		if got := containsWord(tc.s, tc.word); got != tc.want {
+			t.Errorf("containsWord(%q, %q) = %v, want %v", tc.s, tc.word, got, tc.want)
+		}
+	}
+}
+
+// TestParseBoolWordsPrecompiled guards the refactor's purpose: every word
+// parseBool tests has its pattern compiled once at init, so the grading loop
+// never compiles a regexp per reply — and because containsWord has no
+// compile-on-miss fallback, a word missing from the table would panic rather
+// than silently compile.
+func TestParseBoolWordsPrecompiled(t *testing.T) {
+	for _, w := range append(append([]string{}, negativeWords...), positiveWords...) {
+		if _, ok := wordRE[w]; !ok {
+			t.Errorf("word %q used by parseBool has no precompiled pattern", w)
+		}
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("containsWord must refuse a word outside the grading vocabulary instead of compiling it")
+		}
+	}()
+	containsWord("anything", "not-a-vocabulary-word")
+}
