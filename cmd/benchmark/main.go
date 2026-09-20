@@ -196,9 +196,7 @@ func writeModelBOMs(ctx context.Context, cfg runConfig, bin string, models []str
 			fmt.Fprintf(os.Stderr, "model provenance for %s unavailable (skipped): %v\n", m, err)
 			continue
 		}
-		safe := strings.NewReplacer(":", "_", "/", "_").Replace(m)
-		bomPath := filepath.Join(dir, safe+".model.cdx.json")
-		sysPath := filepath.Join(dir, safe+".model.system.json")
+		bomPath, sysPath := provenancePaths(dir, m)
 		if err := os.WriteFile(bomPath, doc, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "write model BOM for %s (skipped): %v\n", m, err)
 			continue
@@ -218,6 +216,13 @@ func writeModelBOMs(ctx context.Context, cfg runConfig, bin string, models []str
 		})
 	}
 	return written
+}
+
+// provenancePaths names a model's two provenance files beside the report, using
+// the same filesystem-safe model name the transcript directory uses.
+func provenancePaths(dir, model string) (bomPath, sysPath string) {
+	safe := benchmark.SafeModelName(model)
+	return filepath.Join(dir, safe+".model.cdx.json"), filepath.Join(dir, safe+".model.system.json")
 }
 
 // allowedTools is the HDF tool set the arm advertises. Empty means the full read

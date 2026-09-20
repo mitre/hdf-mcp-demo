@@ -24,10 +24,16 @@ func (failingInstrument) Chat(_ context.Context, _ []instrument.Message, _ []ins
 }
 
 // fixedInstrument answers immediately (no tool call) with a constant reply and
-// constant token counts, so repeat aggregation is deterministic.
-type fixedInstrument struct{ answer string }
+// constant token counts, so repeat aggregation is deterministic. name, when set,
+// overrides the default so a test can hand the harness a path-hostile model name.
+type fixedInstrument struct{ answer, name string }
 
-func (fixedInstrument) Name() string { return "fixed" }
+func (f fixedInstrument) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	return "fixed"
+}
 func (f fixedInstrument) Chat(_ context.Context, _ []instrument.Message, _ []instrument.Tool) (instrument.Result, error) {
 	return instrument.Result{
 		Message:      instrument.Message{Role: "assistant", Content: f.answer},
@@ -69,7 +75,9 @@ func TestRunArm_TranscriptWritten(t *testing.T) {
 	dir := t.TempDir()
 	tb := agent.NewRawFileToolBox(t.TempDir())
 	opts := Options{Repeat: 2, TranscriptDir: dir}
-	got := runArm(context.Background(), fixedInstrument{answer: "ANSWER: 3"}, tb, ArmHDF,
+	// A path-hostile model name pins that the transcript directory goes through
+	// SafeModelName — the caller, not only the helper, is what must not drift.
+	got := runArm(context.Background(), fixedInstrument{answer: "ANSWER: 3", name: `org\fixed:1b`}, tb, ArmHDF,
 		opts, "q?", truth.Answered("3"), KindCount, "grype-match-count.hdf")
 	if got.Err != "" {
 		t.Fatalf("unexpected arm error: %s", got.Err)
@@ -92,7 +100,7 @@ func TestRunArm_TranscriptWritten(t *testing.T) {
 		} `json:"messages"`
 	}
 	for sample := 0; sample < 2; sample++ {
-		p := filepath.Join(dir, "fixed", "grype-match-count.hdf.s"+string(rune('0'+sample))+".json")
+		p := filepath.Join(dir, "org_fixed_1b", "grype-match-count.hdf.s"+string(rune('0'+sample))+".json")
 		b, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatalf("transcript %s: %v", p, err)
@@ -100,7 +108,7 @@ func TestRunArm_TranscriptWritten(t *testing.T) {
 		if err := json.Unmarshal(b, &tr); err != nil {
 			t.Fatalf("transcript is not valid JSON: %v", err)
 		}
-		if tr.Model != "fixed" || tr.Arm != string(ArmHDF) || tr.Verdict != string(Correct) || tr.Sample != sample {
+		if tr.Model != `org\fixed:1b` || tr.Arm != string(ArmHDF) || tr.Verdict != string(Correct) || tr.Sample != sample {
 			t.Errorf("transcript meta = %+v", tr)
 		}
 		if tr.Prompt != "q?" || tr.System == "" {
@@ -133,14 +141,20 @@ func TestRunArm_TranscriptWritten(t *testing.T) {
 	}
 }
 
-// A model name with path-hostile characters (ollama's "gpt-oss:20b") must map to
-// a usable directory name.
-func TestTranscriptModelDir(t *testing.T) {
-	if got := sanitizeModelDir("ollama:gpt-oss:20b"); got != "ollama_gpt-oss_20b" {
-		t.Errorf("sanitizeModelDir = %q", got)
-	}
-	if got := sanitizeModelDir("open/ai:x"); got != "open_ai_x" {
-		t.Errorf("sanitizeModelDir = %q", got)
+// TestSafeModelName pins the one mapping from a model name to a filesystem-safe
+// name that every artifact named after a model must share — transcript
+// directories and provenance files alike. Ollama tags carry ':', gateway names
+// may carry '/', and a Windows-style name may carry '\\'.
+func TestSafeModelName(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"ollama:gpt-oss:20b", "ollama_gpt-oss_20b"},
+		{"open/ai:x", "open_ai_x"},
+		{`org\model:7b`, "org_model_7b"},
+		{"plain-name", "plain-name"},
+	} {
+		if got := SafeModelName(tc.in); got != tc.want {
+			t.Errorf("SafeModelName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

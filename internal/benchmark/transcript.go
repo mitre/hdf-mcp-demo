@@ -84,7 +84,7 @@ func writeTranscript(dir, model, label string, sample int, arm Arm, system, prom
 		tr.Messages = append(tr.Messages, tm)
 	}
 
-	sub := filepath.Join(dir, sanitizeModelDir(model))
+	sub := filepath.Join(dir, SafeModelName(model))
 	if err := os.MkdirAll(sub, 0o750); err != nil {
 		return err
 	}
@@ -96,9 +96,12 @@ func writeTranscript(dir, model, label string, sample int, arm Arm, system, prom
 	return os.WriteFile(filepath.Join(sub, name), b, 0o600)
 }
 
-// sanitizeModelDir maps a model name to a filesystem-safe directory name
-// (ollama tags carry ':', gateway names may carry '/').
-func sanitizeModelDir(model string) string {
+// SafeModelName maps a model name to a filesystem-safe name. It is the single
+// definition every artifact named after a model uses — transcript directories
+// here, provenance files in cmd/benchmark — so one model's outputs never land
+// under two spellings. Ollama tags carry ':', gateway names may carry '/', and
+// a backslash is a separator on Windows.
+func SafeModelName(model string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
 		case ':', '/', '\\':

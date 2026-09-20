@@ -146,3 +146,16 @@ func TestRejectPositional(t *testing.T) {
 		}
 	}
 }
+
+// TestProvenancePaths pins that the model BOM and HDF System files are named
+// with the same filesystem-safe model name the transcript directory uses, so
+// one model's artifacts never end up under two spellings.
+func TestProvenancePaths(t *testing.T) {
+	bom, sys := provenancePaths("out", `org\gpt-oss:20b`)
+	if want := "out/org_gpt-oss_20b.model.cdx.json"; bom != want {
+		t.Errorf("bom path = %q, want %q", bom, want)
+	}
+	if want := "out/org_gpt-oss_20b.model.system.json"; sys != want {
+		t.Errorf("system path = %q, want %q", sys, want)
+	}
+}
