@@ -54,6 +54,7 @@ func main() {
 	modelsFlag := flag.String("models", "", "comma-separated models to run; overrides OPENAI_MODEL_LIST/OPENAI_MODEL when set")
 	timeout := flag.Duration("timeout", 0, "overall run timeout for the whole invocation; 0 = scale automatically (see defaultTimeout) from the model count and provider")
 	perModel := flag.Duration("model-timeout", 0, "per-model timeout, isolating one stalled model from the rest; 0 = auto (60m for local Ollama, shared -timeout for a gateway); negative disables it")
+	requestTimeout := flag.Duration("request-timeout", instrument.DefaultRequestTimeout, "cap on ONE model HTTP request. A slow reasoning response that exceeds it fails as a transport error and is retried, so an arm can spend (1+retries) x this value before -model-timeout applies; raise it with -maxtokens for models that think for a long time. 0 restores the default; there is no uncapped setting")
 	format := flag.String("format", "text", "output format: text | json | markdown")
 	outPath := flag.String("out", "", "write results to this file instead of stdout (progress still goes to stderr)")
 	overwrite := flag.Bool("overwrite", false, "allow -out to overwrite an existing file")
@@ -74,7 +75,8 @@ func main() {
 	cfg := runConfig{
 		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
 		concurrency: *concurrency, models: instrument.SplitList(*modelsFlag), timeout: *timeout, perModel: *perModel,
-		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
+		requestTimeout: *requestTimeout,
+		format:         strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
 		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider), numCtx: *numCtx,
 		bookendsOnly: *bookendsOnly, transcripts: *transcripts, questions: *questions,
 		toolset: instrument.SplitList(*toolset),
@@ -96,17 +98,22 @@ type runConfig struct {
 	concurrency       int
 	models            []string
 	timeout, perModel time.Duration
-	format            string
-	outPath           string
-	overwrite         bool
-	repeat            int
-	temperature       float64
-	provider          string
-	numCtx            int
-	bookendsOnly      bool
-	transcripts       string
-	questions         string   // -questions file; empty = the built-in questions.md
-	toolset           []string // advertised HDF tools; empty = the full read surface
+	// requestTimeout caps ONE HTTP request to the model endpoint. It is distinct
+	// from perModel (a whole model's budget) and timeout (the whole invocation):
+	// this one is what a single slow reasoning response is measured against, and
+	// what the retry loop multiplies.
+	requestTimeout time.Duration
+	format         string
+	outPath        string
+	overwrite      bool
+	repeat         int
+	temperature    float64
+	provider       string
+	numCtx         int
+	bookendsOnly   bool
+	transcripts    string
+	questions      string   // -questions file; empty = the built-in questions.md
+	toolset        []string // advertised HDF tools; empty = the full read surface
 }
 
 // rejectPositional refuses arguments the flag package left unparsed. Go stops
@@ -149,6 +156,7 @@ func buildInstrument(cfg runConfig, base, model string) instrument.Instrument {
 	var setTemp = cfg.temperature >= 0 // negative sentinel = omit
 	if cfg.provider == "ollama" {
 		o := instrument.NewOllama(base, model)
+		o.SetRequestTimeout(cfg.requestTimeout)
 		o.NumPredict = cfg.maxTokens
 		o.NumCtx = cfg.numCtx
 		if setTemp {
@@ -158,6 +166,7 @@ func buildInstrument(cfg runConfig, base, model string) instrument.Instrument {
 		return o
 	}
 	o := instrument.NewOpenAI(base, model, os.Getenv("OPENAI_API_KEY"))
+	o.SetRequestTimeout(cfg.requestTimeout)
 	o.MaxTokens = cfg.maxTokens
 	if setTemp {
 		t := cfg.temperature
@@ -467,6 +476,7 @@ func run(cfg runConfig) error {
 		Timestamp: time.Now().UTC().Format(time.RFC3339), Provider: cfg.provider, Models: models,
 		Concurrency: cfg.concurrency, MaxTokens: cfg.maxTokens, MaxIters: cfg.maxIters, AdHoc: cfg.adhoc,
 		Repeat: cfg.repeat, Temperature: cfg.temperature, NumCtx: metaNumCtx(cfg),
+		RequestTimeout:  cfg.requestTimeout,
 		Questions:       cfg.questions,
 		ModelProvenance: writeModelBOMs(ctx, cfg, bin, models),
 	}

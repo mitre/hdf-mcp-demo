@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,5 +158,38 @@ func TestOllama_ShowModel(t *testing.T) {
 	}
 	if len(got.Capabilities) != 2 {
 		t.Errorf("Capabilities = %v, want two", got.Capabilities)
+	}
+}
+
+// TestOllama_RequestTimeoutIsConfigurable is the OpenAI adapter's request-timeout
+// contract for the local instrument, which has no retry loop: one attempt, and an
+// error that names the cap rather than leaving a reader to guess whether the
+// local server is wedged or the model merely thought for too long.
+func TestOllama_RequestTimeoutIsConfigurable(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		time.Sleep(300 * time.Millisecond) // outlives the 50ms cap below
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"too late"}}`))
+	}))
+	defer srv.Close()
+
+	o := NewOllama(srv.URL, "slow-model")
+	o.SetRequestTimeout(50 * time.Millisecond)
+	if got := o.HTTP.Timeout; got != 50*time.Millisecond {
+		t.Fatalf("configured request timeout = %s, want 50ms", got)
+	}
+	_, err := o.Chat(context.Background(), []Message{{Role: "user", Content: "think hard"}}, nil)
+	if err == nil {
+		t.Fatal("want an error when the response outlives the request timeout")
+	}
+	if !strings.Contains(err.Error(), "50ms") {
+		t.Errorf("error %q does not name the configured request timeout", err)
+	}
+	if !strings.Contains(err.Error(), "request timeout") {
+		t.Errorf("error %q does not say the request timeout is what elapsed", err)
+	}
+	if n := atomic.LoadInt32(&attempts); n != 1 {
+		t.Errorf("endpoint saw %d attempts, want 1 (the ollama adapter does not retry)", n)
 	}
 }

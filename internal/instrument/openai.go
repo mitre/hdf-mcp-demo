@@ -36,9 +36,16 @@ func NewOpenAI(baseURL, model, apiKey string) *OpenAI {
 		Model:      model,
 		APIKey:     apiKey,
 		MaxRetries: 4,
-		HTTP:       &http.Client{Timeout: 5 * time.Minute},
+		HTTP:       newHTTPClient(DefaultRequestTimeout),
 	}
 }
+
+// SetRequestTimeout caps one HTTP round-trip to the endpoint (-request-timeout).
+// A response that takes longer fails as a transport error and is retried like any
+// other, so the worst case inside one arm is (1 + MaxRetries) x d — raise it for a
+// slow reasoning model deliberately, and expect the report to record it. A
+// non-positive d restores DefaultRequestTimeout; there is no "no cap" setting.
+func (o *OpenAI) SetRequestTimeout(d time.Duration) { setRequestTimeout(o.HTTP, d) }
 
 // Name identifies the instrument (host + model, never the key).
 func (o *OpenAI) Name() string { return "openai:" + o.Model }
@@ -133,10 +140,15 @@ func (o *OpenAI) chatOnce(ctx context.Context, raw []byte) (_ Result, retryable 
 	resp, err := o.HTTP.Do(req)
 	if err != nil {
 		// A context cancellation/deadline is terminal; other transport errors are transient.
-		if ctx.Err() != nil {
-			return Result{}, false, fmt.Errorf("openai-compatible chat to %s: %w", o.BaseURL, err)
+		retry := ctx.Err() == nil
+		// Name the cap when it is what elapsed. "context deadline exceeded" alone
+		// reads identically for a dead endpoint and for a model that was still
+		// thinking, and the two call for opposite remedies.
+		if timedOut(err) {
+			return Result{}, retry, fmt.Errorf("openai-compatible chat to %s: no response within the %s request timeout (-request-timeout): %w",
+				o.BaseURL, o.HTTP.Timeout, err)
 		}
-		return Result{}, true, fmt.Errorf("openai-compatible chat to %s: %w", o.BaseURL, err)
+		return Result{}, retry, fmt.Errorf("openai-compatible chat to %s: %w", o.BaseURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

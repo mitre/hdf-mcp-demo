@@ -192,6 +192,8 @@ Leave headroom: the context window costs memory on top of the weights, and each 
 |------|------------------------|
 | `-numctx` | Context window for Ollama (default 32768). Ollama's own default is 4096 whatever the model advertises, and it truncates **silently** — too small for the raw arm. |
 | `-maxtokens` | Completion cap (default 4096). Reasoning models spend tokens thinking before answering; too low a cap truncates them into a false abstention. |
+| `-model-timeout` | Budget for one model's whole turn through the bank, isolating a stalled model from the rest (default: auto — 60m locally, the shared `-timeout` for a gateway; negative disables it). |
+| `-request-timeout` | Cap on **one** HTTP request to the endpoint (default 5m). A slow reasoning response that exceeds it fails as a transport error and is retried, so a single arm can spend (1 + retries) × this value before `-model-timeout` even applies. Raise it together with `-maxtokens` for models that think for a long time; the report's settings line records it whenever it is not the default. There is no uncapped setting — the cap is what makes a hung connection fail. |
 | `-repeat` | Runs per question per arm; reports accuracy as a rate and cost as mean±stddev. |
 | `-concurrency` | Questions in flight per model (2 locally, 4 for a gateway). Raise only if you have memory to spare. |
 | `-format` | `text`, `json`, or `markdown` — for a saved, self-describing artifact. |

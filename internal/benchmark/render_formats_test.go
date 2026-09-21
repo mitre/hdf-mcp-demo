@@ -5,8 +5,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mitre/hdf-mcp-demo/internal/agent"
+	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
 
@@ -180,6 +182,46 @@ func TestMetaNumCtx(t *testing.T) {
 	}
 	if strings.Contains(js, "numCtx") {
 		t.Errorf("RenderJSON reported numCtx for a run without one:\n%s", js)
+	}
+}
+
+// TestMetaRequestTimeout checks the per-request cap is reported when a run moved
+// it and stays out of the output when the run used the default. A slow reasoning
+// model that never finished inside the cap is a property of the RUN, not of the
+// endpoint, so the artifact has to say which cap produced its failures — but
+// printing the default on every report would be noise no reader acts on.
+func TestMetaRequestTimeout(t *testing.T) {
+	set := RunMeta{Models: []string{"m"}, RequestTimeout: 20 * time.Minute}
+	if got := MetaText(set); !strings.Contains(got, "request-timeout=20m0s") {
+		t.Errorf("MetaText omitted request-timeout:\n%s", got)
+	}
+	if got := RenderMarkdown(set, nil, false, nil); !strings.Contains(got, "request-timeout=20m0s") {
+		t.Errorf("RenderMarkdown omitted request-timeout:\n%s", got)
+	}
+	js, err := RenderJSON(set, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js, `"requestTimeout": "20m0s"`) {
+		t.Errorf("RenderJSON omitted requestTimeout:\n%s", js)
+	}
+
+	// The default and the zero value both mean "unremarkable" and print nothing.
+	for _, d := range []time.Duration{0, instrument.DefaultRequestTimeout} {
+		unset := RunMeta{Models: []string{"m"}, RequestTimeout: d}
+		if got := MetaText(unset); strings.Contains(got, "request-timeout") {
+			t.Errorf("MetaText reported request-timeout for the %s default:\n%s", d, got)
+		}
+		if got := RenderMarkdown(unset, nil, false, nil); strings.Contains(got, "request-timeout") {
+			t.Errorf("RenderMarkdown reported request-timeout for the %s default:\n%s", d, got)
+		}
+		js, err := RenderJSON(unset, nil, false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(js, "requestTimeout") {
+			t.Errorf("RenderJSON reported requestTimeout for the %s default:\n%s", d, js)
+		}
 	}
 }
 

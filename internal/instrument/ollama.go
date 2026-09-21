@@ -34,8 +34,13 @@ func NewOllama(baseURL, model string) *Ollama {
 	if baseURL == "" {
 		baseURL = DefaultOllamaURL
 	}
-	return &Ollama{BaseURL: baseURL, Model: model, HTTP: &http.Client{Timeout: 5 * time.Minute}}
+	return &Ollama{BaseURL: baseURL, Model: model, HTTP: newHTTPClient(DefaultRequestTimeout)}
 }
+
+// SetRequestTimeout caps one HTTP round-trip to the local server
+// (-request-timeout). This adapter does not retry, so the cap is the whole budget
+// for a single chat turn. A non-positive d restores DefaultRequestTimeout.
+func (o *Ollama) SetRequestTimeout(d time.Duration) { setRequestTimeout(o.HTTP, d) }
 
 // Name identifies the instrument.
 func (o *Ollama) Name() string { return "ollama:" + o.Model }
@@ -93,6 +98,12 @@ func (o *Ollama) Chat(ctx context.Context, msgs []Message, tools []Tool) (Result
 
 	resp, err := o.HTTP.Do(req)
 	if err != nil {
+		// Name the cap when it is what elapsed, so a slow model is not reported
+		// the same way as a server that is not there.
+		if timedOut(err) {
+			return Result{}, fmt.Errorf("ollama chat to %s: no response within the %s request timeout (-request-timeout): %w",
+				o.BaseURL, o.HTTP.Timeout, err)
+		}
 		return Result{}, fmt.Errorf("ollama chat (is `ollama serve` running at %s?): %w", o.BaseURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()

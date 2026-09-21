@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
 
@@ -29,6 +31,12 @@ type RunMeta struct {
 	Repeat      int
 	Temperature float64
 	NumCtx      int // ollama only: the context window the run was given; 0 = provider default
+	// RequestTimeout is the per-HTTP-request cap the run gave its instrument
+	// (-request-timeout). A slow model that never answered inside it is a property
+	// of the run, not of the endpoint, so an artifact whose failures came from a
+	// moved cap has to say so. 0 or instrument.DefaultRequestTimeout is the
+	// unremarkable case and is not printed.
+	RequestTimeout time.Duration
 	// Questions is the -questions file the run's prompts came from; empty means
 	// the built-in set. A reworded or reduced bank changes what every number
 	// means, so an artifact must say which one it measured.
@@ -61,8 +69,9 @@ func MetaText(m RunMeta) string {
 	if len(m.Models) > 0 {
 		fmt.Fprintf(&b, "  models:    %s\n", strings.Join(m.Models, ", "))
 	}
-	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s%s%s\n",
-		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature), numCtxStr(m.NumCtx, " "), questionsStr(m.Questions, " "))
+	fmt.Fprintf(&b, "  settings:  concurrency=%d max-tokens=%d max-iters=%d ad-hoc=%v repeat=%d temperature=%s%s%s%s\n",
+		m.Concurrency, m.MaxTokens, m.MaxIters, m.AdHoc, m.Repeat, tempStr(m.Temperature),
+		numCtxStr(m.NumCtx, " "), requestTimeoutStr(m.RequestTimeout, " "), questionsStr(m.Questions, " "))
 	if m.Provider != "" {
 		fmt.Fprintf(&b, "  cost:      %s\n", chargeStatement(m.Provider))
 	}
@@ -80,6 +89,27 @@ func numCtxStr(n int, sep string) string {
 		return ""
 	}
 	return fmt.Sprintf("%snum-ctx=%d", sep, n)
+}
+
+// requestTimeoutStr renders the per-request cap when the run moved it, and
+// nothing when it used the default — printing "request-timeout=5m0s" on every
+// report would be noise no reader acts on, while a moved cap explains failures
+// that the endpoint did not cause.
+func requestTimeoutStr(d time.Duration, sep string) string {
+	v := requestTimeoutValue(d)
+	if v == "" {
+		return ""
+	}
+	return sep + "request-timeout=" + v
+}
+
+// requestTimeoutValue is the bare value the JSON artifact carries, and the single
+// place that decides whether a run's cap is worth reporting at all.
+func requestTimeoutValue(d time.Duration) string {
+	if d <= 0 || d == instrument.DefaultRequestTimeout {
+		return ""
+	}
+	return d.String()
 }
 
 // questionsStr names a custom -questions file in the settings line, and nothing
@@ -136,6 +166,7 @@ type jsonMeta struct {
 	Repeat          int              `json:"repeat"`
 	Temperature     float64          `json:"temperature"`
 	NumCtx          int              `json:"numCtx,omitempty"`
+	RequestTimeout  string           `json:"requestTimeout,omitempty"` // only when the run moved it off the default
 	Questions       string           `json:"questions,omitempty"`
 	Cost            string           `json:"costStatement,omitempty"`
 	ModelProvenance []jsonProvenance `json:"modelProvenance,omitempty"`
@@ -280,7 +311,8 @@ func RenderJSON(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) (strin
 	report := jsonReport{Meta: jsonMeta{
 		Timestamp: meta.Timestamp, Provider: meta.Provider, Models: meta.Models, Concurrency: meta.Concurrency,
 		MaxTokens: meta.MaxTokens, MaxIters: meta.MaxIters, AdHoc: adHoc,
-		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx, Questions: meta.Questions,
+		Repeat: meta.Repeat, Temperature: meta.Temperature, NumCtx: meta.NumCtx,
+		RequestTimeout: requestTimeoutValue(meta.RequestTimeout), Questions: meta.Questions,
 		Cost: chargeStatement(meta.Provider), ModelProvenance: toJSONProvenance(meta.ModelProvenance),
 	}}
 	for _, b := range bks {
@@ -375,8 +407,9 @@ func RenderMarkdown(meta RunMeta, runs []ModelRun, adHoc bool, bks []Bookend) st
 		fmt.Fprintf(&b, "- **provider:** %s\n", meta.Provider)
 	}
 	fmt.Fprintf(&b, "- **models:** %s\n", strings.Join(meta.Models, ", "))
-	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s%s%s\n",
-		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature), numCtxStr(meta.NumCtx, ", "), questionsStr(meta.Questions, ", "))
+	fmt.Fprintf(&b, "- **settings:** concurrency=%d, max-tokens=%d, max-iters=%d, ad-hoc=%v, repeat=%d, temperature=%s%s%s%s\n",
+		meta.Concurrency, meta.MaxTokens, meta.MaxIters, adHoc, meta.Repeat, tempStr(meta.Temperature),
+		numCtxStr(meta.NumCtx, ", "), requestTimeoutStr(meta.RequestTimeout, ", "), questionsStr(meta.Questions, ", "))
 	if meta.Provider != "" {
 		fmt.Fprintf(&b, "- **cost:** %s\n", chargeStatement(meta.Provider))
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -70,6 +71,69 @@ func TestOpenAI_RequestAndUsage(t *testing.T) {
 	}
 	if !strings.Contains(string(tc.Arguments), `"path":"x.json"`) {
 		t.Errorf("arguments not parsed as raw JSON: %s", tc.Arguments)
+	}
+}
+
+// TestOpenAI_RequestTimeoutIsConfigurable pins the knob a slow reasoning model
+// needs. A response that outlives the request cap fails as a transport error, so
+// the message must NAME the cap: a report reader seeing only "context deadline
+// exceeded" cannot tell a model that thought for too long from an endpoint that
+// is simply down. The attempt count is asserted too, because the retry loop
+// treats a transport failure as retryable — with the hidden five-minute literal
+// that meant up to twenty-five minutes of wall clock inside one arm.
+func TestOpenAI_RequestTimeoutIsConfigurable(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		time.Sleep(300 * time.Millisecond) // outlives the 50ms cap below
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"too late"}}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAI(srv.URL+"/v1", "slow-model", "")
+	c.SetRequestTimeout(50 * time.Millisecond)
+	c.MaxRetries = 1 // one retry: two attempts, and no more
+
+	if got := c.HTTP.Timeout; got != 50*time.Millisecond {
+		t.Fatalf("configured request timeout = %s, want 50ms", got)
+	}
+	_, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "think hard"}}, nil)
+	if err == nil {
+		t.Fatal("want an error when the response outlives the request timeout")
+	}
+	if !strings.Contains(err.Error(), "50ms") {
+		t.Errorf("error %q does not name the configured request timeout", err)
+	}
+	if !strings.Contains(err.Error(), "request timeout") {
+		t.Errorf("error %q does not say the request timeout is what elapsed", err)
+	}
+	if n := atomic.LoadInt32(&attempts); n != 2 {
+		t.Errorf("endpoint saw %d attempts, want 2 (the initial one plus MaxRetries=1)", n)
+	}
+}
+
+// TestRequestTimeoutDefault pins the default at five minutes for BOTH instruments
+// — exposing the knob must not change what an existing run does — and pins that a
+// non-positive value falls back to it rather than meaning "no cap". The cap exists
+// so a hung connection fails; it is made visible here, not removed.
+func TestRequestTimeoutDefault(t *testing.T) {
+	if DefaultRequestTimeout != 5*time.Minute {
+		t.Errorf("DefaultRequestTimeout = %s, want 5m0s", DefaultRequestTimeout)
+	}
+	oa, ol := NewOpenAI("http://x/v1", "m", "k"), NewOllama("", "m")
+	if oa.HTTP.Timeout != DefaultRequestTimeout {
+		t.Errorf("NewOpenAI request timeout = %s, want %s", oa.HTTP.Timeout, DefaultRequestTimeout)
+	}
+	if ol.HTTP.Timeout != DefaultRequestTimeout {
+		t.Errorf("NewOllama request timeout = %s, want %s", ol.HTTP.Timeout, DefaultRequestTimeout)
+	}
+	for _, d := range []time.Duration{0, -time.Second} {
+		oa.SetRequestTimeout(d)
+		ol.SetRequestTimeout(d)
+		if oa.HTTP.Timeout != DefaultRequestTimeout || ol.HTTP.Timeout != DefaultRequestTimeout {
+			t.Errorf("SetRequestTimeout(%s) gave openai %s / ollama %s, want the %s default",
+				d, oa.HTTP.Timeout, ol.HTTP.Timeout, DefaultRequestTimeout)
+		}
 	}
 }
 
