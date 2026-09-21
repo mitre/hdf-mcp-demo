@@ -1,9 +1,12 @@
 package truth
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -110,7 +113,21 @@ func TestHDFParsers(t *testing.T) {
 // conversion (testdata/gosec.hdf.json): the 7-vs-3 count is Class B, rule
 // existence is Class A, and a compliance rate is Class C — all three classes from
 // one small scan, fully offline.
-func TestClassify_GosecPins(t *testing.T) {
+//
+// The table is test-local on purpose. Questions are the benchmark's concern, and
+// benchmark imports truth, so truth cannot read the shipped skeleton; a second
+// package-level bank here would be a duplicate that drifts — and it did. truth
+// owns the ground-truth functions; these pins own the fixtures they need.
+func TestClassifyTable(t *testing.T) {
+	// truth computes two answers and a class. A question's wording lives in the
+	// benchmark's questions.md; a copy carried through here would be a second
+	// source of prompts that the graded path never fills.
+	for _, typ := range []reflect.Type{reflect.TypeOf(Question{}), reflect.TypeOf(Result{})} {
+		if _, ok := typ.FieldByName("Prompt"); ok {
+			t.Errorf("truth.%s must not carry a Prompt field — prompt text is the benchmark's", typ.Name())
+		}
+	}
+
 	raw, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "gosec.json"))
 	if err != nil {
 		t.Fatalf("read raw fixture: %v", err)
@@ -120,31 +137,26 @@ func TestClassify_GosecPins(t *testing.T) {
 		t.Fatalf("read vendored hdf: %v", err)
 	}
 
-	byID := map[string]Candidate{}
-	for _, c := range Bank() {
-		byID[c.ID] = c
-	}
-
 	cases := []struct {
 		id            string
+		raw, hdf      func([][]byte) (Answer, error)
 		wantClass     Class
 		wantRaw       string // "" when unanswerable
 		wantHDF       string
 		rawAnswerable bool
 	}{
-		{"gosec-finding-count", ClassB, "7", "3", true},
-		{"gosec-rule-present", ClassA, "true", "true", true},
-		{"gosec-compliance-rate", ClassC, "", "0", false},
+		{"gosec-finding-count", Primary(GosecFindingCount), Primary(HDFRequirementCount), ClassB, "7", "3", true},
+		{"gosec-rule-present", Primary(GosecRulePresent("G304")), Primary(HDFRequirementPresent("G304")), ClassA, "true", "true", true},
+		{"gosec-compliance-rate", AlwaysUnanswerable, Primary(HDFComplianceRate), ClassC, "", "0", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
-			c, ok := byID[tc.id]
-			if !ok {
-				t.Fatalf("question %s not in Bank()", tc.id)
-			}
-			got, err := Classify(c.Question, [][]byte{raw}, [][]byte{hdf})
+			got, err := Classify(Question{ID: tc.id, Raw: tc.raw, HDF: tc.hdf}, [][]byte{raw}, [][]byte{hdf})
 			if err != nil {
 				t.Fatalf("classify: %v", err)
+			}
+			if got.ID != tc.id {
+				t.Errorf("result id = %q, want %q", got.ID, tc.id)
 			}
 			if got.Class != tc.wantClass {
 				t.Errorf("class = %s, want %s (raw=%+v hdf=%+v)", got.Class, tc.wantClass, got.RawAnswer, got.HDFAnswer)
@@ -157,6 +169,35 @@ func TestClassify_GosecPins(t *testing.T) {
 			}
 			if got.HDFAnswer.Value != tc.wantHDF {
 				t.Errorf("hdf answer = %q, want %q", got.HDFAnswer.Value, tc.wantHDF)
+			}
+		})
+	}
+}
+
+// ID is the only identifier truth carries, and it is what a reader sees when a
+// ground-truth function fails. Both sides must name it — and name which side
+// failed — so a broken raw parser is not mistaken for a broken HDF one. The
+// benchmark's skeleton stamps the ID onto every question it hands Classify.
+func TestClassify_ErrorNamesID(t *testing.T) {
+	boom := func([][]byte) (Answer, error) { return Answer{}, fmt.Errorf("fixture unreadable") }
+	for _, tc := range []struct {
+		side     string
+		q        Question
+		wantSide string
+	}{
+		{"raw", Question{ID: "gosec-distinct-rules", Raw: boom, HDF: AlwaysUnanswerable}, "raw answer"},
+		{"hdf", Question{ID: "gosec-distinct-rules", Raw: AlwaysUnanswerable, HDF: boom}, "hdf answer"},
+	} {
+		t.Run(tc.side, func(t *testing.T) {
+			_, err := Classify(tc.q, nil, nil)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !strings.Contains(err.Error(), "gosec-distinct-rules") {
+				t.Errorf("error %q does not name the question ID", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSide) {
+				t.Errorf("error %q does not name the failing side %q", err, tc.wantSide)
 			}
 		})
 	}

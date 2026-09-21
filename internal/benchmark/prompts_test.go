@@ -20,6 +20,12 @@ func TestEmbeddedQuestionsCoverSkeleton(t *testing.T) {
 	want := map[string]bool{}
 	for _, q := range skeleton() {
 		want[q.ID] = true
+		// The skeleton is the only bank, so it is also the only place that can
+		// name a question for truth.Classify's errors — truth carries no prompt
+		// text of its own to identify it by.
+		if q.Truth.ID != q.ID {
+			t.Errorf("skeleton question %q hands Classify Truth.ID %q; the two must match", q.ID, q.Truth.ID)
+		}
 	}
 	got := map[string]bool{}
 	for _, p := range prompts {

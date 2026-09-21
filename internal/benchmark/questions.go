@@ -103,7 +103,7 @@ func (q Question) hdfNames() []string {
 //     actually work to find what a bounded HDF response returns directly.
 func skeleton() []Question {
 	gosecTruth := truth.Question{Raw: truth.Primary(truth.GosecFindingCount), HDF: truth.Primary(truth.HDFRequirementCount)}
-	return []Question{
+	qs := []Question{
 		{
 			ID:   "gosec-distinct-rules",
 			Kind: KindCount, Intent: IntentHDF,
@@ -310,6 +310,14 @@ func skeleton() []Question {
 			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "nist": []string{"SC-*"}, "status": []string{"failed"}, "limit": 1}}},
 		},
 	}
+	// The skeleton is the single bank, so it is also what names a question for
+	// truth.Classify's errors. Stamped in one place rather than repeated in every
+	// literal: gosecTruth above is deliberately shared by two questions with
+	// different IDs, so the ID cannot live in the truth.Question literal.
+	for i := range qs {
+		qs[i].Truth.ID = qs[i].ID
+	}
+	return qs
 }
 
 // threeScanSources is the sources[] argument naming the three converted scans

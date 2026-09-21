@@ -178,22 +178,24 @@ func TestClassify_GrypeConvert(t *testing.T) {
 		t.Fatalf("read converted hdf: %v", err)
 	}
 
-	byID := map[string]Candidate{}
-	for _, c := range Bank() {
-		byID[c.ID] = c
-	}
-
+	// Test-local, like TestClassifyTable's: the shipped questions live in the
+	// benchmark, which truth cannot import, so these pins carry their own
+	// bindings rather than a second package-level bank.
 	cases := []struct {
 		id        string
+		raw, hdf  func([][]byte) (Answer, error)
 		wantClass Class
 	}{
-		{"grype-match-count", ClassA},     // 89 raw matches == 89 requirements (no dedup)
-		{"grype-cve-present", ClassA},     // existence survives normalization
-		{"grype-compliance-rate", ClassC}, // a vuln scan has no native pass rate
+		// 89 raw matches == 89 requirements (grype does not dedup).
+		{"grype-match-count", Primary(GrypeMatchCount), Primary(HDFRequirementCount), ClassA},
+		// Existence survives normalization.
+		{"grype-cve-present", Primary(GrypeCVEPresent("CVE-2021-36159")), Primary(HDFRequirementPresent("CVE-2021-36159")), ClassA},
+		// A vuln scan has no native pass rate.
+		{"grype-compliance-rate", AlwaysUnanswerable, Primary(HDFComplianceRate), ClassC},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
-			got, err := Classify(byID[tc.id].Question, [][]byte{raw}, [][]byte{hdf})
+			got, err := Classify(Question{ID: tc.id, Raw: tc.raw, HDF: tc.hdf}, [][]byte{raw}, [][]byte{hdf})
 			if err != nil {
 				t.Fatalf("classify: %v", err)
 			}

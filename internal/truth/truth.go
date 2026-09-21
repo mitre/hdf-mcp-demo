@@ -76,25 +76,28 @@ func Nth(i int, fn func([]byte) (Answer, error)) func([][]byte) (Answer, error) 
 	}
 }
 
-// Question binds a prompt to the two functions that compute its ground truth: Raw
+// Question is the two functions that compute one question's ground truth: Raw
 // parses the raw scanner fixtures, HDF reads the converted HDF documents. Both
 // receive every source the question declares, in declaration order, so a
 // cross-document question (SBOM x vuln scan, or a scan against its predecessor)
 // computes its own truth from the same inputs the arms are given. Wrap a
 // single-document function with Primary. The classifier calls both; neither ever
 // sees a model's answer.
+//
+// ID identifies the question in errors and results. The wording is deliberately
+// absent: prompts belong to the benchmark's question bank (questions.md bound to
+// the Go skeleton), which is what stamps this ID. A copy here would be a second
+// source of question text that the graded path never fills.
 type Question struct {
-	ID     string
-	Prompt string
-	Raw    func(rawFixtures [][]byte) (Answer, error)
-	HDF    func(hdfDocs [][]byte) (Answer, error)
+	ID  string
+	Raw func(rawFixtures [][]byte) (Answer, error)
+	HDF func(hdfDocs [][]byte) (Answer, error)
 }
 
 // Result is a classified question: the two computed answers and the class implied
 // by their agreement.
 type Result struct {
 	ID        string
-	Prompt    string
 	RawAnswer Answer
 	HDFAnswer Answer
 	Class     Class
@@ -112,7 +115,6 @@ func Classify(q Question, rawFixtures, hdfDocs [][]byte) (Result, error) {
 	}
 	return Result{
 		ID:        q.ID,
-		Prompt:    q.Prompt,
 		RawAnswer: raw,
 		HDFAnswer: hdf,
 		Class:     classOf(raw, hdf),
