@@ -103,16 +103,34 @@ func (o Options) concurrency() int {
 // from accuracy and its answer is reported only as hallucinate-vs-abstain.
 type ArmResult struct {
 	Arm         Arm
-	Answer      string       // representative (modal) answer across samples
-	Verdict     Verdict      // representative (modal) verdict across samples
-	Scored      bool         // in-remit for this question's data view
-	Samples     int          // number of runs (>=1)
-	Correct     int          // runs graded Correct
-	Agreement   float64      // fraction of runs sharing the modal answer (1.0 for N=1)
-	TokenStdDev float64      // stddev of total tokens across runs (0 for N=1)
-	Err         string       // first error seen, if any run failed
-	Cost        agent.Result // mean cost across runs (Prompt/Completion/ToolCalls/Iterations/Elapsed)
+	Answer      string  // representative (modal) answer across samples
+	Verdict     Verdict // representative (modal) verdict across samples
+	Scored      bool    // in-remit for this question's data view
+	Samples     int     // number of runs (>=1)
+	Correct     int     // runs graded Correct
+	Agreement   float64 // fraction of runs sharing the modal answer (1.0 for N=1)
+	TokenStdDev float64 // stddev of total tokens across runs (0 for N=1)
+	Err         string  // first error seen, if any run failed
+	Cost        ArmCost // mean cost across runs
 }
+
+// ArmCost is the mean cost of one arm over its samples. It is deliberately NOT
+// agent.Result: a sample carries an answer, the model's reasoning text and the
+// full transcript, and none of those mean anything averaged over three runs —
+// reusing the sample type there left three fields that were always empty and a
+// reader having to know which half of the struct was real. These five are exactly
+// what the renderers read, and agent.Result stays what one sample carries.
+type ArmCost struct {
+	PromptTokens     int           // mean prompt tokens, summed over the turns of a sample
+	CompletionTokens int           // mean completion tokens, summed over the turns of a sample
+	ToolCalls        int           // mean tool calls per sample
+	Iterations       int           // mean tool round-trips per sample
+	Elapsed          time.Duration // mean wall clock per sample
+}
+
+// TotalTokens is the mean end-to-end token cost of answering — the headline the
+// two arms are compared on. It mirrors agent.Result.TotalTokens for a sample.
+func (c ArmCost) TotalTokens() int { return c.PromptTokens + c.CompletionTokens }
 
 // QuestionResult is one graded question across the arms.
 type QuestionResult struct {
@@ -332,7 +350,7 @@ func runArm(ctx context.Context, inst instrument.Instrument, tb agent.ToolBox, a
 	agg.Answer = modalStr(answers)
 	agg.Agreement = float64(answers[agg.Answer]) / float64(n)
 	agg.TokenStdDev = stddev(totals)
-	agg.Cost = agent.Result{
+	agg.Cost = ArmCost{
 		PromptTokens: sumPrompt / n, CompletionTokens: sumCompl / n,
 		ToolCalls: sumTool / n, Iterations: sumIter / n, Elapsed: sumElapsed / time.Duration(n),
 	}

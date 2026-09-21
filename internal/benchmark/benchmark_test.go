@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/mitre/hdf-mcp-demo/internal/agent"
@@ -62,6 +63,62 @@ func TestRunArm_Repeat(t *testing.T) {
 	}
 	if got.Cost.TotalTokens() != 110 {
 		t.Errorf("mean total tokens = %d, want 110", got.Cost.TotalTokens())
+	}
+}
+
+// asArmCost is the identity on ArmCost. Go has no implicit conversion between
+// named struct types, so passing ArmResult.Cost through it fails to COMPILE if
+// that field is ever widened back to agent.Result or anything else.
+func asArmCost(c ArmCost) ArmCost { return c }
+
+// TestRunArm_MeanCostHasNoSampleFields pins the shape of the aggregate, not just
+// its numbers. A mean over samples has no answer, no chain-of-thought and no
+// transcript — those belong to ONE run — so ArmResult.Cost must be a
+// benchmark-owned ArmCost carrying exactly the five mean fields the renderers
+// read, and must not be (or embed) agent.Result, where a reader has to know which
+// half of the struct is real. agent.Result stays what a single sample carries.
+func TestRunArm_MeanCostHasNoSampleFields(t *testing.T) {
+	tb := agent.NewRawFileToolBox(t.TempDir())
+	got := runArm(context.Background(), fixedInstrument{answer: "ANSWER: 3"}, tb, ArmHDF,
+		Options{Repeat: 3}, "q?", truth.Answered("3"), KindCount, "q.hdf")
+
+	cost := asArmCost(got.Cost) // will not compile unless Cost is exactly ArmCost
+	if cost.TotalTokens() != 110 {
+		t.Errorf("mean total tokens = %d, want 110 (100 prompt + 10 completion, constant across 3 samples)", cost.TotalTokens())
+	}
+	if cost.PromptTokens != 100 || cost.CompletionTokens != 10 {
+		t.Errorf("mean prompt/completion = %d/%d, want 100/10", cost.PromptTokens, cost.CompletionTokens)
+	}
+
+	// The whole point: the mean type has the five mean fields and nothing else.
+	// A per-sample field surviving into the aggregate is what this pins against.
+	typ := reflect.TypeOf(ArmCost{})
+	want := map[string]bool{"PromptTokens": true, "CompletionTokens": true, "ToolCalls": true, "Iterations": true, "Elapsed": true}
+	if typ.NumField() != len(want) {
+		t.Errorf("ArmCost has %d fields, want exactly %d", typ.NumField(), len(want))
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if !want[f.Name] {
+			t.Errorf("ArmCost carries %q, which has no meaning as a mean over samples", f.Name)
+		}
+		if f.Anonymous {
+			t.Errorf("ArmCost embeds %q; the mean must have FEWER fields than a sample, not inherit them", f.Name)
+		}
+	}
+	for _, name := range []string{"Answer", "ReasoningTokens", "Transcript"} {
+		if _, ok := typ.FieldByName(name); ok {
+			t.Errorf("ArmCost exposes %q, a per-sample field that is meaningless as a mean", name)
+		}
+	}
+
+	// agent.Result is unchanged: it is still what one sample and one transcript
+	// carry, and it still has the per-sample fields ArmCost must not.
+	sample := reflect.TypeOf(agent.Result{})
+	for _, name := range []string{"Answer", "ReasoningTokens", "Transcript"} {
+		if _, ok := sample.FieldByName(name); !ok {
+			t.Errorf("agent.Result lost %q; this card must not change the per-sample type", name)
+		}
 	}
 }
 

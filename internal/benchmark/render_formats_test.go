@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mitre/hdf-mcp-demo/internal/agent"
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
@@ -19,7 +18,7 @@ func sampleRuns() []ModelRun {
 			c = 1
 		}
 		return ArmResult{Arm: a, Verdict: v, Scored: scored, Samples: 1, Correct: c, Agreement: 1, Answer: "x",
-			Cost: agent.Result{PromptTokens: prompt, CompletionTokens: compl, ToolCalls: 1, Iterations: 1}}
+			Cost: ArmCost{PromptTokens: prompt, CompletionTokens: compl, ToolCalls: 1, Iterations: 1}}
 	}
 	results := []QuestionResult{
 		// objective (A): both arms scored, both correct.
@@ -112,8 +111,8 @@ func TestClassD_RawOnly(t *testing.T) {
 
 	rs := []QuestionResult{{
 		ID: "d1", Ask: "?", Class: truth.ClassD,
-		Raw: ArmResult{Arm: ArmRaw, Verdict: Correct, Scored: true, Samples: 1, Correct: 1, Cost: agent.Result{PromptTokens: 10}},
-		HDF: ArmResult{Arm: ArmHDF, Verdict: Hallucinated, Scored: false, Samples: 1, Cost: agent.Result{PromptTokens: 20}},
+		Raw: ArmResult{Arm: ArmRaw, Verdict: Correct, Scored: true, Samples: 1, Correct: 1, Cost: ArmCost{PromptTokens: 10}},
+		HDF: ArmResult{Arm: ArmHDF, Verdict: Hallucinated, Scored: false, Samples: 1, Cost: ArmCost{PromptTokens: 20}},
 	}}
 	if rc, rn := scoredAccuracy(rs, ArmRaw); rc != 1 || rn != 1 {
 		t.Errorf("raw scored = %d/%d, want 1/1", rc, rn)

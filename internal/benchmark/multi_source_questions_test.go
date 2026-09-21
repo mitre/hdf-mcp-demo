@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mitre/hdf-mcp-demo/internal/agent"
 	"github.com/mitre/hdf-mcp-demo/internal/mcpclient"
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
@@ -145,7 +144,7 @@ func TestAdHocPrompt(t *testing.T) {
 func TestRender_AdHocCellBlankForQuestionsWithoutAnArm(t *testing.T) {
 	arm := func(a Arm, prompt int) ArmResult {
 		return ArmResult{Arm: a, Verdict: Correct, Scored: true, Samples: 1, Correct: 1, Agreement: 1,
-			Cost: agent.Result{PromptTokens: prompt, CompletionTokens: 50}}
+			Cost: ArmCost{PromptTokens: prompt, CompletionTokens: 50}}
 	}
 	adhoc := arm(ArmHDF, 300) // 350 tokens
 	plain := QuestionResult{ID: "plain-question", Ask: "?", Class: truth.ClassA,
