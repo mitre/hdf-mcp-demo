@@ -32,7 +32,7 @@ func TestRun_AdHocArmRunsForEveryQuestion(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	results, err := Run(context.Background(), stubInstrument{}, sess, bin, "../../fixtures", root, Bank(),
+	results, err := Run(context.Background(), stubInstrument{}, Env{Session: sess, Bin: bin, FixturesDir: "../../fixtures", Root: root}, Bank(),
 		Options{MaxIters: 2, Concurrency: 3, AdHoc: true})
 	if err != nil {
 		t.Fatalf("run: %v", err)

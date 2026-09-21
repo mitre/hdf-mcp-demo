@@ -551,7 +551,7 @@ func computeBookends(ctx context.Context, cfg runConfig, bin, baseRoot string, b
 		return nil, err
 	}
 	defer func() { _ = sess.Close() }()
-	return benchmark.ComputeBookends(ctx, sess, bin, cfg.fixturesDir, root, bank)
+	return benchmark.ComputeBookends(ctx, benchmark.Env{Session: sess, Bin: bin, FixturesDir: cfg.fixturesDir, Root: root}, bank)
 }
 
 // runModel gives one model its own MCP server process and its own document root,
@@ -579,7 +579,7 @@ func runModel(ctx context.Context, cfg runConfig, bin, baseRoot, model string, i
 	defer func() { _ = sess.Close() }()
 
 	opts.Tools = allowedTools(cfg)
-	results, err := benchmark.Run(ctx, inst, sess, bin, cfg.fixturesDir, root, bank, opts)
+	results, err := benchmark.Run(ctx, inst, benchmark.Env{Session: sess, Bin: bin, FixturesDir: cfg.fixturesDir, Root: root}, bank, opts)
 	if err != nil {
 		if tail := strings.TrimSpace(sess.ServerLog()); tail != "" {
 			return nil, fmt.Errorf("%w\n  hdf mcp server said:\n%s", err, indent(tail, "    "))

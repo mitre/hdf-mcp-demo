@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mitre/hdf-mcp-demo/internal/mcpclient"
 	"github.com/mitre/hdf-mcp-demo/internal/tok"
 	"github.com/mitre/hdf-mcp-demo/internal/truth"
 )
@@ -27,13 +26,13 @@ type Bookend struct {
 	Responses   []string // raw oracle payloads, for the gated ground-truth pin
 }
 
-// ComputeBookends stages and normalizes the bank's fixtures under root (exactly
+// ComputeBookends stages and normalizes the bank's fixtures under env.Root (exactly
 // as a graded run does), then computes each question's bookends: tokenize the raw
 // sources, execute the hand-written oracle calls against the live session, and
 // tokenize their responses. Entirely model-free — this is token accounting, not
 // inference — so it also backs the offline -bookends mode.
-func ComputeBookends(ctx context.Context, sess *mcpclient.Session, bin, fixturesDir, root string, bank []Question) ([]Bookend, error) {
-	rawBytes, err := stageAndConvert(ctx, sess, bin, fixturesDir, root, bank)
+func ComputeBookends(ctx context.Context, env Env, bank []Question) ([]Bookend, error) {
+	rawBytes, err := stageAndConvert(ctx, env, bank)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +47,7 @@ func ComputeBookends(ctx context.Context, sess *mcpclient.Session, bin, fixtures
 			b.RawCeiling += n
 		}
 		for _, c := range q.Oracle {
-			payload, err := sess.Call(ctx, c.Tool, c.Args)
+			payload, err := env.Session.Call(ctx, c.Tool, c.Args)
 			if err != nil {
 				return nil, fmt.Errorf("[%s] oracle %s: %w", q.ID, c.Tool, err)
 			}

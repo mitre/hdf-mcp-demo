@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -24,6 +25,31 @@ import (
 type stubInstrument struct{}
 
 var jsonNameRE = regexp.MustCompile(`[\w.-]+\.json`)
+
+// TestEnvIsWhereNotHow pins the split Env exists for. Env is WHERE a run happens
+// — the session, the binary, the fixtures, the root — and Options is the per-run
+// POLICY. Folding policy into Env would put a run's knobs and its location behind
+// one name again, which is what made the eight positional parameters possible.
+// Needs no session, so it runs in the ordinary offline suite.
+func TestEnvIsWhereNotHow(t *testing.T) {
+	typ := reflect.TypeOf(Env{})
+	want := []string{"Session", "Bin", "FixturesDir", "Root"}
+	if typ.NumField() != len(want) {
+		t.Errorf("Env has %d fields, want exactly %d (%v)", typ.NumField(), len(want), want)
+	}
+	for _, name := range want {
+		if _, ok := typ.FieldByName(name); !ok {
+			t.Errorf("Env is missing %q", name)
+		}
+	}
+	// Options, or any of its knobs, appearing here would re-merge policy into
+	// location — the anti-pattern this card names.
+	for _, policy := range []string{"Options", "Opts", "MaxIters", "Repeat", "Concurrency", "AdHoc", "TranscriptDir", "Tools"} {
+		if _, ok := typ.FieldByName(policy); ok {
+			t.Errorf("Env carries %q; Options is per-run policy, Env is where the run happens", policy)
+		}
+	}
+}
 
 func (stubInstrument) Name() string { return "stub" }
 
@@ -100,7 +126,7 @@ func TestBenchmark_Pipeline(t *testing.T) {
 	// Concurrency > 1 exercises the parallel path and the shared-session mutex;
 	// TranscriptDir exercises the diagnostic capture under concurrency.
 	trDir := t.TempDir()
-	results, err := Run(context.Background(), stubInstrument{}, sess, bin, "../../fixtures", root, Bank(),
+	results, err := Run(context.Background(), stubInstrument{}, Env{Session: sess, Bin: bin, FixturesDir: "../../fixtures", Root: root}, Bank(),
 		Options{MaxIters: 4, Concurrency: 3, TranscriptDir: trDir})
 	if err != nil {
 		t.Fatalf("run: %v", err)
@@ -189,7 +215,7 @@ func TestBenchmark_ReusedRootAcrossModels(t *testing.T) {
 
 	bank := Bank()[:1] // one question is enough; the failure was in staging
 	for model := 1; model <= 2; model++ {
-		results, err := Run(context.Background(), stubInstrument{}, sess, bin, "../../fixtures", root, bank, Options{MaxIters: 4})
+		results, err := Run(context.Background(), stubInstrument{}, Env{Session: sess, Bin: bin, FixturesDir: "../../fixtures", Root: root}, bank, Options{MaxIters: 4})
 		if err != nil {
 			t.Fatalf("model %d over a shared root: %v", model, err)
 		}

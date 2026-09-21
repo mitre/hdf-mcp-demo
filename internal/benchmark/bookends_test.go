@@ -165,7 +165,7 @@ func TestOracles_MatchGroundTruth(t *testing.T) {
 	defer func() { _ = sess.Close() }()
 
 	bank := Bank()
-	bks, err := ComputeBookends(context.Background(), sess, bin, "../../fixtures", root, bank)
+	bks, err := ComputeBookends(context.Background(), Env{Session: sess, Bin: bin, FixturesDir: "../../fixtures", Root: root}, bank)
 	if err != nil {
 		t.Fatalf("compute bookends: %v", err)
 	}
