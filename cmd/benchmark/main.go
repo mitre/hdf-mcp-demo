@@ -73,11 +73,11 @@ func main() {
 
 	cfg := runConfig{
 		fixturesDir: *fixturesDir, adhoc: *adhoc, maxIters: *maxIters, maxTokens: *maxTokens,
-		concurrency: *concurrency, models: splitModels(*modelsFlag), timeout: *timeout, perModel: *perModel,
+		concurrency: *concurrency, models: instrument.SplitList(*modelsFlag), timeout: *timeout, perModel: *perModel,
 		format: strings.ToLower(*format), outPath: *outPath, overwrite: *overwrite,
 		repeat: *repeat, temperature: *temperature, provider: strings.ToLower(*provider), numCtx: *numCtx,
 		bookendsOnly: *bookendsOnly, transcripts: *transcripts, questions: *questions,
-		toolset: splitModels(*toolset),
+		toolset: instrument.SplitList(*toolset),
 	}
 	if cfg.concurrency <= 0 {
 		cfg.concurrency = defaultConcurrency(cfg.provider)
@@ -339,17 +339,6 @@ func checkOllamaModels(ctx context.Context, base string, models []string) error 
 		return errors.New(msg)
 	}
 	return nil
-}
-
-// splitModels parses the comma-separated -models flag, trimming blanks.
-func splitModels(s string) []string {
-	var out []string
-	for _, m := range strings.Split(s, ",") {
-		if m = strings.TrimSpace(m); m != "" {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // preflight validates every cheap precondition BEFORE the expensive model run, so
