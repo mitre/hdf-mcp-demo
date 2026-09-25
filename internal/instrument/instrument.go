@@ -18,7 +18,52 @@ package instrument
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"time"
 )
+
+// DefaultRequestTimeout caps ONE HTTP round-trip to a model endpoint. It is a
+// deliberate cap, not an absence of one: without it a hung connection would stall
+// an arm until the run-wide timeout fired. Five minutes is generous for a chat
+// completion and was the value both instruments hard-coded before it became a
+// flag (-request-timeout), so exposing the knob leaves existing runs unchanged.
+//
+// It interacts with the retry loop: a response that outlives the cap fails as a
+// transport error, which the OpenAI adapter treats as retryable, so the worst
+// case inside one arm is (1 + MaxRetries) x this value. Raising it for a slow
+// reasoning model therefore has to be a visible decision, which is why the value
+// is recorded in the report when it differs from this default.
+const DefaultRequestTimeout = 5 * time.Minute
+
+// newHTTPClient builds the per-request-capped client both instruments use.
+// A non-positive timeout means "unspecified" and takes the default — never "no
+// cap", which is the one value the study must not silently acquire.
+func newHTTPClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = DefaultRequestTimeout
+	}
+	return &http.Client{Timeout: timeout}
+}
+
+// setRequestTimeout re-caps an existing client in place, so whoever holds it
+// (including a caller that swapped in its own) keeps the same client value.
+func setRequestTimeout(c *http.Client, d time.Duration) {
+	if d <= 0 {
+		d = DefaultRequestTimeout
+	}
+	c.Timeout = d
+}
+
+// timedOut reports whether err is a client-side timeout rather than some other
+// transport failure. http.Client.Timeout surfaces as a *url.Error whose Timeout()
+// is true; a dial or response-header deadline reports the same way, and all of
+// them mean the same thing to a report reader: nothing came back in time.
+func timedOut(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 // Message is one chat message. Role is system|user|assistant|tool.
 type Message struct {

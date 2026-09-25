@@ -95,3 +95,120 @@ func TestKeySelection(t *testing.T) {
 		t.Errorf("Class C hdf-arm key = %q, want the HDF value 3", got.Value)
 	}
 }
+
+// TestGrade_DecliningReplyAbstains pins the rule grade.go states about itself:
+// prefer a false Abstained over a false anything-else. A reply that declines
+// asserts nothing, so it must never be recorded as a confident wrong answer —
+// that reads downstream as a capability failure when it is usually a broken
+// tool call. The count path already guarded this; the bool path did not.
+func TestGrade_DecliningReplyAbstains(t *testing.T) {
+	answerable := truth.Answered("true")
+	for _, tc := range []struct {
+		name  string
+		reply string
+	}{
+		{"cannot answer, mentions yes/no", "I could not open the document, so I cannot give a definitive yes/no answer."},
+		{"tool failed", "The tool returned an error, so I am unable to determine whether it is present."},
+		{"no data", "I don't know — there is no data available to answer this."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Grade(tc.reply, answerable, KindBool); got != Abstained {
+				t.Errorf("Grade(%q) = %s, want %s", tc.reply, got, Abstained)
+			}
+		})
+	}
+}
+
+// TestGrade_AnswerLineBeatsTrailingCommentary pins that an ANSWER line is read
+// as its value, not as a bag of words. Models routinely echo the system prompt's
+// format template after the value; that echo carries both "yes" and "no" and was
+// outvoting the answer the model actually gave.
+func TestGrade_AnswerLineBeatsTrailingCommentary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+		key   truth.Answer
+		kind  Kind
+		want  Verdict
+	}{
+		{"echoed template after yes", "ANSWER: yes — where <value> is a single number, or a single yes/no, and nothing else on that line.", truth.Answered("true"), KindBool, Correct},
+		{"echoed template after no", "ANSWER: no — where <value> is a single number, or a single yes/no, and nothing else on that line.", truth.Answered("false"), KindBool, Correct},
+		{"prose justification after yes", "ANSWER: yes — the CVE identifier appears in the grype.json scan.", truth.Answered("true"), KindBool, Correct},
+		{"echoed template after count", "ANSWER: 3 — where <value> is a single number, and nothing else on that line.", truth.Answered("3"), KindCount, Correct},
+		{"wrong value still wrong", "ANSWER: no — where <value> is a single yes/no.", truth.Answered("true"), KindBool, Wrong},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Grade(tc.reply, tc.key, tc.kind); got != tc.want {
+				t.Errorf("Grade(%q) = %s, want %s", tc.reply, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGrade_ContradictoryReplyAbstains covers the whole-reply fallback: when a
+// reply carries both signals and no ANSWER line to disambiguate, the honest
+// verdict is Abstained. Resolving silently to "no" (the old first-match-wins
+// order) invented a confident answer the model never gave.
+func TestGrade_ContradictoryReplyAbstains(t *testing.T) {
+	reply := "Results are mixed: yes for the openssl package, no for zlib."
+	if got := Grade(reply, truth.Answered("true"), KindBool); got != Abstained {
+		t.Errorf("Grade(contradictory) = %s, want %s", got, Abstained)
+	}
+}
+
+// TestGrade_NegationsStillNegative guards the fix from over-correcting: the
+// negated phrasings contain positive words ("not present" contains "present"),
+// and value-only parsing must not re-read them as affirmations.
+func TestGrade_NegationsStillNegative(t *testing.T) {
+	for _, reply := range []string{
+		"ANSWER: not present",
+		"ANSWER: it is not found in the scan",
+		"ANSWER: false",
+		"ANSWER: no",
+	} {
+		if got := Grade(reply, truth.Answered("false"), KindBool); got != Correct {
+			t.Errorf("Grade(%q) with key=false = %s, want %s", reply, got, Correct)
+		}
+	}
+}
+
+// TestContainsWord pins whole-word matching before the implementation stops
+// compiling a pattern per call: a word must not match inside a longer word, and
+// punctuation is a boundary.
+func TestContainsWord(t *testing.T) {
+	for _, tc := range []struct {
+		s, word string
+		want    bool
+	}{
+		{"no", "no", true},
+		{"not present", "no", false},
+		{"the answer is no.", "no", true},
+		{"nobody knows", "no", false},
+		{"yes, it is present", "present", true},
+		{"presently", "present", false},
+		{"", "yes", false},
+	} {
+		if got := containsWord(tc.s, tc.word); got != tc.want {
+			t.Errorf("containsWord(%q, %q) = %v, want %v", tc.s, tc.word, got, tc.want)
+		}
+	}
+}
+
+// TestParseBoolWordsPrecompiled guards the refactor's purpose: every word
+// parseBool tests has its pattern compiled once at init, so the grading loop
+// never compiles a regexp per reply — and because containsWord has no
+// compile-on-miss fallback, a word missing from the table would panic rather
+// than silently compile.
+func TestParseBoolWordsPrecompiled(t *testing.T) {
+	for _, w := range append(append([]string{}, negativeWords...), positiveWords...) {
+		if _, ok := wordRE[w]; !ok {
+			t.Errorf("word %q used by parseBool has no precompiled pattern", w)
+		}
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("containsWord must refuse a word outside the grading vocabulary instead of compiling it")
+		}
+	}()
+	containsWord("anything", "not-a-vocabulary-word")
+}

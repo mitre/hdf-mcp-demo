@@ -6,18 +6,39 @@ import (
 
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 	"github.com/mitre/hdf-mcp-demo/internal/mcpclient"
+	"github.com/mitre/hdf-mcp-demo/internal/tok"
 )
 
-// ReadTools is the realistic read/analysis surface a querying agent needs. The
-// write tools (hdf_author, hdf_apply_amendment) and hdf_convert are excluded: the
-// HDF arm operates on already-normalized documents (the amortized pipeline case).
+// ReadTools is the realistic read/analysis surface a querying agent needs — the
+// server's own "read" profile, pinned by TestReadTools_MatchesServerReadProfile
+// so a tool added upstream cannot go unadvertised (and so unmeasured). The write
+// tools (hdf_author, hdf_apply_amendment) and hdf_convert are excluded by that
+// profile: the HDF arm operates on already-normalized documents (the amortized
+// pipeline case).
 var ReadTools = map[string]bool{
 	"hdf_open":       true,
 	"hdf_inspect":    true,
 	"hdf_query":      true,
 	"hdf_compliance": true,
+	"hdf_aggregate":  true,
 	"hdf_diff":       true,
 	"hdf_validate":   true,
+}
+
+// SchemaTokens is the token cost of the tool definitions this box advertises —
+// the fixed price the arm pays on EVERY round trip, before any document data
+// moves. It is measured rather than estimated so that "a smaller surface is
+// cheaper" is a number, and so a surface that grows can be caught growing.
+func (t *MCPToolBox) SchemaTokens() int {
+	b, err := json.Marshal(t.defs)
+	if err != nil {
+		return 0
+	}
+	n, err := tok.Count(string(b))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // MCPToolBox is the HDF arm's tool surface: the real HDF MCP tools, taken live

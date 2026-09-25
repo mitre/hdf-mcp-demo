@@ -1,7 +1,7 @@
 # ADR-0001: hdf-mcp-demo — a usage primer and efficiency demonstration for the HDF MCP server
 
 **Date:** 2026-08-16
-**Status:** proposed
+**Status:** proposed — *amended 2026-08-24, see [Amendments](#amendments)*
 **Deciders:** Will Dower
 
 ## Context
@@ -180,3 +180,69 @@ Ship the MCP with only the in-repo guide; leave the efficiency claim anecdotal.
 
 ### Relationship to hdf-libs tracking
 Tracked from the hdf-libs board under epic `uqhe`: `uqhe.1` (the signal probe — its method ports into Phase 2), `uqhe.2` (hdf-libs doc references to this repo). Future Phase 3/4 cards are created only when their phase is reached.
+
+## Amendments
+
+The record below is left as written; these note where the built system has since
+diverged from it, and why.
+
+### 2026-08-24 — Phase 3 shipped as `cmd/benchmark`, not `cmd/study`
+
+The Implementation Plan above specifies `cmd/study/`. The graded two-arm harness
+shipped as **`cmd/benchmark/`**, with its grading in `internal/benchmark/` rather
+than the planned `internal/grade/`. The owner has decided to keep the shipped
+name rather than rename to match this ADR.
+
+This is worth recording rather than leaving as a silent contradiction, because
+the Decision section above argues the opposite framing — *"Teaching-first beats
+benchmark-first. A primer someone can run and learn from is a more useful and
+more durable artifact than a courtroom exhibit"* — so the command is named for
+the very word the ADR chose to avoid. The framing still holds: the repo leads
+with the primer, and the graded numbers exist to be checked rather than
+brandished. But the artifact that produces them is a benchmark, it is referred to
+as one in every card and commit, and renaming it now would break more references
+than the consistency is worth.
+
+Anyone reading the plan should therefore map `cmd/study` → `cmd/benchmark` and
+`internal/grade` → `internal/benchmark` throughout.
+
+### 2026-08-24 — the Phase 2 ingest demo is superseded by benchmark bookends
+
+Phase 2 delivered `cmd/demo`, `internal/demo` and `run.sh`: an offline
+token-ingest comparison whose result was published as a static table in the
+README. That table has been replaced by the benchmark's **bookends**
+(`go run ./cmd/benchmark -bookends`), and the demo code is deleted.
+
+The reason is evidentiary, not cosmetic. The demo's HDF side was a *hand-written
+optimal call* asserted by us and pinned to nothing, which invites exactly the
+objection the study exists to survive — that we wrote our own steelman. The
+bookends compute the same ceiling per **graded** question, against the same
+ground truth the two-arm study grades on, so the ideal and the measured result
+are the same questions and can be compared row by row. The bookends also print
+the questions whose oracle is *unreachable* through the bounded read surface,
+which the demo's table had no way to express.
+
+This reverses an earlier decision (recorded in the notes on hdf-libs-uqhe.5) to
+keep the Phase-2 table as reproducible demo output. Owner-approved on the
+grounds that the replacement *measures* what the table asserted.
+
+Tracked as hdf-libs-uqhe.11. Phase 2's primer sections in the README remain — it
+is only the token-ingest demonstration that moved.
+
+### Which number forecasts agent cost
+
+The two measurements this repo produces are not interchangeable, and conflating
+them has already caused real confusion — a reader who took the ceiling for a cost
+forecast could not reproduce it against a live endpoint, because no model is
+involved in producing it.
+
+| Measurement | Produced by | What it is |
+|---|---|---|
+| **Ingest ceiling** | `cmd/benchmark -bookends` | A **best case**. The raw side is charged for whole files; the HDF side gets a hand-optimal call. Offline, model-free. Useful for sizing headroom. **Not a cost forecast.** |
+| **Graded study** | `cmd/benchmark` against a real model | What a model **actually** spent and whether it got the right answer. On small scans it can favour the raw arm. **This is the number that forecasts agent cost.** |
+
+The graded report's `vsCeil` and `vsOracle` columns tie them together per
+question: what the model spent as a multiple of each bookend. A `vsCeil` below 1
+means the raw arm's grep-and-paginate beat the whole-file ceiling, which is the
+usual case and the clearest evidence that the ceiling must not be quoted as a
+saving.

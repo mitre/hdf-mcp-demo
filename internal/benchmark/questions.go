@@ -17,20 +17,77 @@ const (
 // reads, the ground-truth functions that compute each view's answer (reused from
 // the truth package), how to grade a free-text reply, and — for Class B — which
 // view's value is intended.
+// Source is one document a question reads: the raw fixture and the normalized
+// document produced from it. Most questions have exactly one; a cross-document
+// question (an SBOM joined against a vuln scan, a scan diffed against its
+// predecessor) declares several, and both arms are told about all of them.
+type Source struct {
+	Fixture string // raw fixture filename (under fixtures/)
+	From    string // hdf_convert source format; empty when CLIPrep is set
+	HDFName string // normalized filename produced under the run root
+	// CLIPrep normalizes via the shipped hdf CLI instead of the hdf_convert MCP
+	// tool, as argv with {raw}/{hdf} placeholders. SPDX becomes an HDF *System*
+	// document through `hdf system create`, which is not an hdf_convert path.
+	CLIPrep []string
+}
+
+// OracleCall is one hand-written, ideal-play MCP tool invocation — the bookend
+// the ceiling analysis assumes. It is executed model-free; its response tokens
+// are the hdfOracle bookend, and the gated oracle test pins its response against
+// the question's computed ground truth so an "optimal call" that does not
+// actually answer the question cannot ship.
+type OracleCall struct {
+	Tool string
+	Args map[string]any
+}
+
 type Question struct {
 	ID      string
-	Ask     string // natural-language question; the harness appends the file name per arm
-	Fixture string // raw fixture filename (under fixtures/)
-	From    string // hdf_convert source format
-	HDFName string // converted filename produced under the run root
+	Ask     string   // natural-language prompt, bound from questions.md by ID; the harness appends the file names per arm
+	Sources []Source // documents the question reads, in the order both arms are told about them
 	Kind    Kind
 	Intent  IntentView // Class B only
 	Truth   truth.Question
+	// Exactly one of Oracle / OracleUnreachable is set: either the ideal-play
+	// call(s) for the bounded surface, or the reason no bounded call can answer
+	// (which is itself a reported finding, not an excuse).
+	Oracle            []OracleCall
+	OracleUnreachable string
 }
 
-// Bank is the vetted question set (ADR-0002 Phase 3c). It spans all three classes
-// and — critically — carries the Class-B gosec count in BOTH directions so the
-// study never reports only the HDF-flattering side:
+// Primary is the question's first source — the one an ad-hoc (convert-on-demand)
+// prompt names.
+func (q Question) Primary() Source {
+	if len(q.Sources) == 0 {
+		return Source{}
+	}
+	return q.Sources[0]
+}
+
+// rawNames and hdfNames list the question's filenames for prompt construction.
+func (q Question) rawNames() []string {
+	out := make([]string, 0, len(q.Sources))
+	for _, s := range q.Sources {
+		out = append(out, s.Fixture)
+	}
+	return out
+}
+
+func (q Question) hdfNames() []string {
+	out := make([]string, 0, len(q.Sources))
+	for _, s := range q.Sources {
+		out = append(out, s.HDFName)
+	}
+	return out
+}
+
+// skeleton is the vetted question set (ADR-0002 Phase 3c) minus its wording:
+// everything that binds a question to its ground truth — sources, kind, intent,
+// truth functions, oracle — keyed by ID. The prompt text lives in questions.md
+// and is bound by Bank / BankFrom, so the human-written half of the study is
+// editable as text while the answer keys stay in code. The set spans all three
+// classes and — critically — carries the Class-B gosec count in BOTH directions
+// so the study never reports only the HDF-flattering side:
 //
 //   - gosec-distinct-rules  (B, intent=HDF): "distinct rule violations" → key 3;
 //     HDF wins, the raw arm must manually deduplicate.
@@ -41,66 +98,232 @@ type Question struct {
 //   - grype-cve-present     (A): existence survives normalization.
 //   - grype-compliance-rate (C): a vuln scan has no native pass rate; HDF adds it,
 //     and we measure how often the raw arm invents one.
-func Bank() []Question {
-	gosecTruth := truth.Question{Raw: truth.GosecFindingCount, HDF: truth.HDFRequirementCount}
-	return []Question{
+//   - inspec-control-count / inspec-compliance-rate (A): the same two shapes over a
+//     1.2MB compliance run — the large-document regime, where the raw arm must
+//     actually work to find what a bounded HDF response returns directly.
+func skeleton() []Question {
+	gosecTruth := truth.Question{Raw: truth.Primary(truth.GosecFindingCount), HDF: truth.Primary(truth.HDFRequirementCount)}
+	qs := []Question{
 		{
 			ID:   "gosec-distinct-rules",
-			Ask:  "How many DISTINCT rule violations (unique rule IDs) are in the gosec SAST scan?",
 			Kind: KindCount, Intent: IntentHDF,
-			Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json",
-			Truth: gosecTruth,
+			Sources: []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
+			Truth:   gosecTruth,
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "gosec.hdf.json"}, "limit": 1}}},
 		},
 		{
 			ID:   "gosec-total-findings",
-			Ask:  "How many total findings did the gosec SAST scanner emit (the raw count of individual finding entries, before any de-duplication)?",
 			Kind: KindCount, Intent: IntentRaw,
-			Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json",
-			Truth: gosecTruth,
+			Sources:           []Source{{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"}},
+			Truth:             gosecTruth,
+			OracleUnreachable: "result-level finding volume; the read surface projects requirement counts only",
 		},
 		{
 			ID:   "grype-match-count",
-			Ask:  "How many vulnerability matches are in the grype scan?",
 			Kind: KindCount, Intent: IntentHDF, // A: both views agree, intent is moot
-			Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json",
-			Truth: truth.Question{Raw: truth.GrypeMatchCount, HDF: truth.HDFRequirementCount},
+			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeMatchCount), HDF: truth.Primary(truth.HDFRequirementCount)},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "limit": 1}}},
 		},
 		{
 			ID:   "grype-cve-present",
-			Ask:  "Is CVE-2021-36159 present in the grype scan? Answer yes or no.",
 			Kind: KindBool, Intent: IntentHDF,
-			Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json",
-			Truth: truth.Question{Raw: truth.GrypeCVEPresent("CVE-2021-36159"), HDF: truth.HDFRequirementPresent("CVE-2021-36159")},
+			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeCVEPresent("CVE-2021-36159")), HDF: truth.Primary(truth.HDFRequirementPresent("CVE-2021-36159"))},
+			// search, not id: converters namespace requirement IDs (Grype/CVE-…),
+			// and searching the bare CVE is how a real ideal caller would ask.
+			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "search": "CVE-2021-36159", "limit": 1}}},
 		},
 		{
 			ID:   "grype-compliance-rate",
-			Ask:  "What percentage of the grype scan is passing (the compliance pass rate)? Answer with a whole-number percentage.",
 			Kind: KindCount, Intent: IntentHDF,
-			Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json",
-			Truth: truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.HDFComplianceRate},
+			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.Primary(truth.HDFComplianceRate)},
+			Oracle:  []OracleCall{{Tool: "hdf_compliance", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}}}},
 		},
 		{
 			ID:   "grype-has-critical",
-			Ask:  "Does the grype scan contain any Critical-severity finding? Answer yes or no.",
 			Kind: KindBool, Intent: IntentHDF,
-			Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json",
-			Truth: truth.Question{Raw: truth.GrypeSeverityPresent("Critical"), HDF: truth.HDFImpactPresentAtLeast(0.9)},
+			Sources: []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.GrypeSeverityPresent("Critical")), HDF: truth.Primary(truth.HDFImpactPresentAtLeast(0.9))},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "impact": ">=0.9", "limit": 1}}},
+		},
+		// Category 5: the case where the HDF arm is expected to LOSE. grype records
+		// relatedVulnerabilities; conversion preserves it verbatim in the
+		// requirement's `code`, so the document can answer (Class A) — but no HDF
+		// read tool projects `code`, so the arm must succeed through the bounded
+		// surface or fail. Graded, not excused: see HDFRelatedVulnCountFromCode.
+		{
+			ID:   "grype-related-vulns",
+			Kind: KindCount, Intent: IntentHDF,
+			Sources:           []Source{{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"}},
+			Truth:             truth.Question{Raw: truth.Primary(truth.GrypeRelatedVulnCount), HDF: truth.Primary(truth.HDFRelatedVulnCountFromCode)},
+			OracleUnreachable: "preserved verbatim in the requirement's code field, which no read tool projects",
 		},
 		{
 			ID:   "zap-alert-count",
-			Ask:  "How many alerts are in the ZAP (DAST) scan?",
 			Kind: KindCount, Intent: IntentHDF, // A: ZAP does not dedup, so raw==HDF
-			Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json",
-			Truth: truth.Question{Raw: truth.ZapAlertCount, HDF: truth.HDFRequirementCount},
+			Sources: []Source{{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.ZapAlertCount), HDF: truth.Primary(truth.HDFRequirementCount)},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "limit": 1}}},
+		},
+		// The InSpec pair is the large-document case (1.2MB raw). Everything else in
+		// the bank is a small-to-medium scan, where a bounded tool response has
+		// little room to beat grep — so without these the study never exercises the
+		// regime normalization is actually for. InSpec is already rule-shaped, so
+		// both views agree and the comparison stays apples-to-apples.
+		{
+			ID:   "inspec-control-count",
+			Kind: KindCount, Intent: IntentHDF, // A: InSpec is rule-shaped already, so raw==HDF
+			Sources: []Source{{Fixture: "inspec.json", From: "hdf", HDFName: "inspec.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.InspecControlCount), HDF: truth.Primary(truth.HDFRequirementCount)},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "inspec.hdf.json"}, "limit": 1}}},
+		},
+		{
+			ID:   "inspec-compliance-rate",
+			Kind: KindCount, Intent: IntentHDF, // A: a compliance run states pass/fail natively
+			Sources: []Source{{Fixture: "inspec.json", From: "hdf", HDFName: "inspec.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.InspecComplianceRate), HDF: truth.Primary(truth.HDFComplianceRate)},
+			Oracle:  []OracleCall{{Tool: "hdf_compliance", Args: map[string]any{"source": map[string]any{"path": "inspec.hdf.json"}}}},
 		},
 		{
 			ID:   "zap-high-severity-count",
-			Ask:  "How many high-risk alerts are in the ZAP scan?",
 			Kind: KindCount, Intent: IntentHDF,
-			Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json",
-			Truth: truth.Question{Raw: truth.ZapHighCount, HDF: truth.HDFImpactCountAtLeast(0.7)},
+			Sources: []Source{{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"}},
+			Truth:   truth.Question{Raw: truth.Primary(truth.ZapHighCount), HDF: truth.Primary(truth.HDFImpactCountAtLeast(0.7))},
+			Oracle:  []OracleCall{{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "impact": ">=0.7", "limit": 1}}},
+		},
+		// The cross-format aggregate is HDF's core use case (the Heimdall workflow):
+		// one question over three UNLIKE severity vocabularies — gosec's
+		// LOW/MEDIUM/HIGH, ZAP's numeric riskcodes, grype's Critical..Unknown. The
+		// raw arm must discover and reconcile all three itself; the HDF arm filters
+		// one normalized impact scale three times. Both views agree on the real
+		// fixtures (0 + 3 + 57 = 60), so the vocabulary mapping itself is what is
+		// being trusted — and the truth pins fail loudly if a converter ever breaks
+		// band alignment.
+		{
+			ID:   "cross-format-high-count",
+			Kind: KindCount, Intent: IntentHDF,
+			Sources: []Source{
+				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
+				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
+				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
+			},
+			Truth: truth.Question{Raw: truth.CrossFormatHighSeverityCount, HDF: truth.HDFImpactTotalAtLeast(0.7)},
+			Oracle: []OracleCall{
+				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "gosec.hdf.json"}, "impact": ">=0.7", "limit": 1}},
+				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "zap.hdf.json"}, "impact": ">=0.7", "limit": 1}},
+				{Tool: "hdf_query", Args: map[string]any{"source": map[string]any{"path": "grype.hdf.json"}, "impact": ">=0.7", "limit": 1}},
+			},
+		},
+		// The temporal diff runs over a REAL pair: grype scans of alpine:3.11 and
+		// alpine:3.12 captured with one grype version and DB (see
+		// fixtures/PROVENANCE.md). Distinct-ID level is deliberate — grype emits one
+		// match per package instance, so an instance-level diff reports churn for
+		// CVEs that persist across version bumps.
+		{
+			ID:   "grype-fixed-vulns",
+			Kind: KindCount, Intent: IntentHDF, // A: requirement IDs are the vulnerability IDs
+			Sources: []Source{
+				{Fixture: "grype-alpine311.json", From: "grype", HDFName: "grype-alpine311.hdf.json"},
+				{Fixture: "grype-alpine312.json", From: "grype", HDFName: "grype-alpine312.hdf.json"},
+			},
+			Truth:  truth.Question{Raw: truth.GrypeDistinctFixedCount, HDF: truth.HDFDistinctFixedCount},
+			Oracle: []OracleCall{{Tool: "hdf_diff", Args: map[string]any{"from": map[string]any{"path": "grype-alpine311.hdf.json"}, "to": map[string]any{"path": "grype-alpine312.hdf.json"}}}},
+		},
+		// The SBOM×vuln join is the bank's genuine Class D (raw-only): the syft
+		// SBOM covers the SAME image the grype scan does, but `hdf system create`
+		// carries the SBOM as a reference (boms[].ref) with no embedded inventory,
+		// so the HDF view does not contain the join key at all. The raw arm must
+		// actually join two files; the HDF arm is out of remit and is measured on
+		// hallucinate-vs-abstain.
+		{
+			ID:   "sbom-vuln-free-packages",
+			Kind: KindCount, Intent: IntentRaw, // D: only the raw view holds the join key
+			Sources: []Source{
+				{Fixture: "grype-alpine312.json", From: "grype", HDFName: "grype-alpine312.hdf.json"},
+				{Fixture: "spdx-alpine312.json", HDFName: "spdx-alpine312.system.hdf.json",
+					CLIPrep: []string{"system", "create", "{raw}", "--from", "spdx", "-o", "{hdf}"}},
+			},
+			Truth:             truth.Question{Raw: truth.SBOMVulnFreePackageCount, HDF: truth.HDFVulnFreePackageCount},
+			OracleUnreachable: "the join key (package inventory) is carried as a BOM reference, not embedded — no HDF document or read tool holds it",
+		},
+		// The multi-source questions (ADR-0016 §7): the pipeline has produced one
+		// HDF document per scanner, and the HDF arm is told all three. The read
+		// tools take `sources[]`, so a cross-tool question can be ONE call over the
+		// set — the server combines the documents in memory, one baseline per
+		// scanner named `<tool>/<original>` — where the raw arm reads three scanner
+		// files in three formats. Whether the model reaches for `sources[]` or makes
+		// three calls is part of what is measured. Nothing about the set leaks into
+		// the raw arm's prompt.
+		//
+		// Distinct CWEs is Class A by construction and the normalization is
+		// stated: gosec cites cwe.id ("22"), ZAP cites cweid per alert, grype
+		// cites none; each converted document carries its requirements' normalized
+		// `cwe` ("CWE-22"). Both views compare by number, as a union across
+		// scanners. The oracle pages the set's rows with the cwe correlation field
+		// (3 pages of 40 cover 120 rows).
+		{
+			ID:   "multi-distinct-cwe-count",
+			Kind: KindCount, Intent: IntentHDF,
+			Sources: []Source{
+				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
+				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
+				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
+			},
+			Truth: truth.Question{Raw: truth.CrossToolDistinctCWECount, HDF: truth.HDFDistinctCWECount},
+			Oracle: []OracleCall{
+				{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "fields": []string{"cwe"}, "limit": 40, "page": 0}},
+				{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "fields": []string{"cwe"}, "limit": 40, "page": 1}},
+				{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "fields": []string{"cwe"}, "limit": 40, "page": 2}},
+			},
+		},
+		// One scanner inside the set: the HDF arm must select ZAP — by querying
+		// zap.hdf.json alone, or the `owasp zap/*` baselines of the combined
+		// view; the raw arm must pick zap.json out of the three it is told about.
+		// Same fact as zap-high-severity-count, different regime — there the HDF
+		// arm was handed zap.hdf.json alone.
+		{
+			ID:   "multi-zap-high-count",
+			Kind: KindCount, Intent: IntentHDF,
+			Sources: []Source{
+				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
+				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
+				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
+			},
+			Truth:  truth.Question{Raw: truth.Nth(1, truth.ZapHighCount), HDF: truth.Nth(1, truth.HDFImpactCountAtLeast(0.7))},
+			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "baseline": "owasp zap/*", "impact": ">=0.7", "limit": 1}}},
+		},
+		// The cross-tool control-family rollup is HDF-native (Class C): no scanner
+		// output carries a NIST 800-53 mapping, so the family view exists only
+		// after normalization — and over the set it is one filtered call. The raw
+		// arm is measured on hallucinate-vs-abstain, as for every Class C.
+		{
+			ID:   "multi-nist-sc-failed-count",
+			Kind: KindCount, Intent: IntentHDF,
+			Sources: []Source{
+				{Fixture: "gosec.json", From: "gosec", HDFName: "gosec.hdf.json"},
+				{Fixture: "zap.json", From: "zap", HDFName: "zap.hdf.json"},
+				{Fixture: "grype.json", From: "grype", HDFName: "grype.hdf.json"},
+			},
+			Truth:  truth.Question{Raw: truth.AlwaysUnanswerable, HDF: truth.HDFFailedInNISTFamily("SC")},
+			Oracle: []OracleCall{{Tool: "hdf_query", Args: map[string]any{"sources": threeScanSources(), "nist": []string{"SC-*"}, "status": []string{"failed"}, "limit": 1}}},
 		},
 	}
+	// The skeleton is the single bank, so it is also what names a question for
+	// truth.Classify's errors. Stamped in one place rather than repeated in every
+	// literal: gosecTruth above is deliberately shared by two questions with
+	// different IDs, so the ID cannot live in the truth.Question literal.
+	for i := range qs {
+		qs[i].Truth.ID = qs[i].ID
+	}
+	return qs
+}
+
+// threeScanSources is the sources[] argument naming the three converted scans
+// under the run root, in the order the multi-* questions declare them.
+func threeScanSources() []map[string]any {
+	return []map[string]any{{"path": "gosec.hdf.json"}, {"path": "zap.hdf.json"}, {"path": "grype.hdf.json"}}
 }
 
 // key returns the fair grading key for an arm given the question's class and

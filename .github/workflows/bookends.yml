@@ -1,0 +1,93 @@
+# Publishes the model-free token bookends to the run summary.
+#
+# Manual only. This is not CI — it proves the primer reproduces on a standard
+# setup, so it runs when someone asks for it, not on every push.
+#
+# It drives no model: the bookends are token accounting against the shipped hdf
+# binary, so the whole job is free on public runners and takes seconds.
+name: bookends
+
+on:
+  workflow_dispatch:
+    inputs:
+      hdf_ref:
+        description: >-
+          hdf-libs commit to build. Defaults to the pinned commit below. Changing
+          this changes every published number, so the summary records what ran.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # Pinned deliberately rather than tracking main: the MCP tool surface is under
+  # active change, and a moving hdf would make these numbers drift for reasons
+  # that have nothing to do with this repo. Bumping this is a decision, not
+  # maintenance — see hdf-libs-uqhe.6.
+  HDF_LIBS_PIN: aeb9e579
+
+jobs:
+  bookends:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out hdf-mcp-demo
+        uses: actions/checkout@v4
+
+      - name: Check out hdf-libs at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: mitre/hdf-libs
+          ref: ${{ github.event.inputs.hdf_ref || env.HDF_LIBS_PIN }}
+          path: hdf-libs
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the shipped hdf binary
+        run: |
+          cd hdf-libs/hdf-cli
+          go build -o "$GITHUB_WORKSPACE/hdf" ./cmd/hdf
+
+      - name: Record exactly what is being measured
+        id: prov
+        run: |
+          cd hdf-libs
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute the bookends
+        env:
+          HDF_BIN: ${{ github.workspace }}/hdf
+        run: go run ./cmd/benchmark -bookends | tee bookends.txt
+
+      - name: Publish to the job summary
+        env:
+          SHA: ${{ steps.prov.outputs.sha }}
+          SHORT: ${{ steps.prov.outputs.short }}
+        run: |
+          {
+            echo "# Token bookends"
+            echo
+            echo "Model-free token accounting against the shipped \`hdf\` binary."
+            echo "No model runs, so this job costs nothing and takes seconds."
+            echo
+            echo "**Built from** [\`mitre/hdf-libs@$SHORT\`](https://github.com/mitre/hdf-libs/commit/$SHA)"
+            echo
+            echo '## What these numbers are — and are not'
+            echo
+            echo '- **\`rawCeil\`** charges the raw side for the *whole file*. A real agent greps, so this is a **pessimistic** raw baseline.'
+            echo '- **\`oracle\`** is a *hand-written optimal call*, chosen by a human and executed live. An **optimistic** HDF baseline.'
+            echo '- So these bracket the possible; they are **not a forecast of what an agent costs**. For that, read the graded two-arm study.'
+            echo '- Rows marked **oracle unreachable** are questions the bounded read surface cannot answer at any price. They are printed, not filtered — a table showing only the favourable rows would be worthless.'
+            echo
+            echo 'Full interpretation guide: [`docs/interpreting-results.md`](docs/interpreting-results.md)'
+            echo
+            echo '## Bookends'
+            echo
+            echo '```'
+            cat bookends.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

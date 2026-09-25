@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,5 +78,118 @@ func TestOllama_OptionsSent(t *testing.T) {
 	}
 	if opts["temperature"] != float64(0) {
 		t.Errorf("temperature = %v, want 0", opts["temperature"])
+	}
+}
+
+// TestOllama_NumCtxSent verifies num_ctx reaches the request when set, and is
+// absent when left at 0 — the difference between a run the raw-file arm can
+// actually fit in and one Ollama silently truncates to its 4096 default.
+func TestOllama_NumCtxSent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		numCtx int
+		want   any // nil = key must be absent
+	}{
+		{"set", 32768, float64(32768)},
+		{"unset defers to server", 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&got)
+				_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"prompt_eval_count":1,"eval_count":1}`))
+			}))
+			defer srv.Close()
+
+			o := NewOllama(srv.URL, "test-model")
+			o.NumCtx = tc.numCtx
+			if _, err := o.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			opts, _ := got["options"].(map[string]any)
+			if tc.want == nil {
+				if _, present := opts["num_ctx"]; present {
+					t.Errorf("num_ctx = %v, want absent", opts["num_ctx"])
+				}
+				return
+			}
+			if opts["num_ctx"] != tc.want {
+				t.Errorf("num_ctx = %v, want %v", opts["num_ctx"], tc.want)
+			}
+		})
+	}
+}
+
+// TestOllama_ShowModel checks the metadata read used for run provenance: real
+// reported values are surfaced, and fields the server does not report stay zero
+// rather than becoming empty strings a consumer would record as fact.
+func TestOllama_ShowModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/show" {
+			_, _ = w.Write([]byte(`{
+			  "details": {"family":"granite","parameter_size":"8.8B","quantization_level":"Q4_K_M","format":"gguf"},
+			  "model_info": {"general.architecture":"granite","general.license":"apache-2.0","general.parameter_count":8791592960},
+			  "capabilities": ["completion","tools"]
+			}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"models":[{"name":"granite4.1:8b","digest":"abc123","capabilities":["tools"]}]}`))
+	}))
+	defer srv.Close()
+
+	got, err := NewOllama(srv.URL, "granite4.1:8b").ShowModel(context.Background(), "granite4.1:8b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ field, got, want string }{
+		{"Name", got.Name, "granite4.1:8b"},
+		{"Family", got.Family, "granite"},
+		{"Architecture", got.Architecture, "granite"},
+		{"ParameterSize", got.ParameterSize, "8.8B"},
+		{"Quantization", got.Quantization, "Q4_K_M"},
+		{"License", got.License, "apache-2.0"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+	if got.ParameterCount != 8791592960 {
+		t.Errorf("ParameterCount = %d, want 8791592960", got.ParameterCount)
+	}
+	if len(got.Capabilities) != 2 {
+		t.Errorf("Capabilities = %v, want two", got.Capabilities)
+	}
+}
+
+// TestOllama_RequestTimeoutIsConfigurable is the OpenAI adapter's request-timeout
+// contract for the local instrument, which has no retry loop: one attempt, and an
+// error that names the cap rather than leaving a reader to guess whether the
+// local server is wedged or the model merely thought for too long.
+func TestOllama_RequestTimeoutIsConfigurable(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		time.Sleep(300 * time.Millisecond) // outlives the 50ms cap below
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"too late"}}`))
+	}))
+	defer srv.Close()
+
+	o := NewOllama(srv.URL, "slow-model")
+	o.SetRequestTimeout(50 * time.Millisecond)
+	if got := o.HTTP.Timeout; got != 50*time.Millisecond {
+		t.Fatalf("configured request timeout = %s, want 50ms", got)
+	}
+	_, err := o.Chat(context.Background(), []Message{{Role: "user", Content: "think hard"}}, nil)
+	if err == nil {
+		t.Fatal("want an error when the response outlives the request timeout")
+	}
+	if !strings.Contains(err.Error(), "50ms") {
+		t.Errorf("error %q does not name the configured request timeout", err)
+	}
+	if !strings.Contains(err.Error(), "request timeout") {
+		t.Errorf("error %q does not say the request timeout is what elapsed", err)
+	}
+	if n := atomic.LoadInt32(&attempts); n != 1 {
+		t.Errorf("endpoint saw %d attempts, want 1 (the ollama adapter does not retry)", n)
 	}
 }

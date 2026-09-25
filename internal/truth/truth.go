@@ -48,41 +48,73 @@ func Unanswerable() Answer { return Answer{Answerable: false} }
 // AlwaysUnanswerable is a ground-truth function for a view that can never express
 // the fact (e.g. a compliance pass rate over a raw vuln scan). It ignores its
 // input and marks the answer unanswerable, which drives Class C.
-func AlwaysUnanswerable(_ []byte) (Answer, error) { return Unanswerable(), nil }
+func AlwaysUnanswerable(_ [][]byte) (Answer, error) { return Unanswerable(), nil }
 
-// Question binds a prompt to the two functions that compute its ground truth: Raw
-// parses the raw scanner fixture, HDF reads the converted HDF document. The
-// classifier calls both; neither ever sees a model's answer.
+// Primary adapts a single-document ground-truth function to the multi-document
+// signature by handing it the question's first source. Most questions read one
+// file; only the cross-document ones (an SBOM joined against a vuln scan, a scan
+// diffed against its predecessor) need more, and they read the slice directly.
+func Primary(fn func([]byte) (Answer, error)) func([][]byte) (Answer, error) {
+	return func(docs [][]byte) (Answer, error) {
+		if len(docs) == 0 {
+			return Answer{}, fmt.Errorf("no document supplied")
+		}
+		return fn(docs[0])
+	}
+}
+
+// Nth adapts a single-document ground-truth function to the multi-document
+// signature by handing it the question's i-th source — for a per-tool question
+// over a set of scanner documents, where each arm is told every file but the
+// fact lives in one of them.
+func Nth(i int, fn func([]byte) (Answer, error)) func([][]byte) (Answer, error) {
+	return func(docs [][]byte) (Answer, error) {
+		if i < 0 || i >= len(docs) {
+			return Answer{}, fmt.Errorf("source %d requested but only %d supplied", i, len(docs))
+		}
+		return fn(docs[i])
+	}
+}
+
+// Question is the two functions that compute one question's ground truth: Raw
+// parses the raw scanner fixtures, HDF reads the converted HDF documents. Both
+// receive every source the question declares, in declaration order, so a
+// cross-document question (SBOM x vuln scan, or a scan against its predecessor)
+// computes its own truth from the same inputs the arms are given. Wrap a
+// single-document function with Primary. The classifier calls both; neither ever
+// sees a model's answer.
+//
+// ID identifies the question in errors and results. The wording is deliberately
+// absent: prompts belong to the benchmark's question bank (questions.md bound to
+// the Go skeleton), which is what stamps this ID. A copy here would be a second
+// source of question text that the graded path never fills.
 type Question struct {
-	ID     string
-	Prompt string
-	Raw    func(rawFixture []byte) (Answer, error)
-	HDF    func(hdfDoc []byte) (Answer, error)
+	ID  string
+	Raw func(rawFixtures [][]byte) (Answer, error)
+	HDF func(hdfDocs [][]byte) (Answer, error)
 }
 
 // Result is a classified question: the two computed answers and the class implied
 // by their agreement.
 type Result struct {
 	ID        string
-	Prompt    string
 	RawAnswer Answer
 	HDFAnswer Answer
 	Class     Class
 }
 
 // Classify computes the raw-view and HDF-view answers for q and tags the result.
-func Classify(q Question, rawFixture, hdfDoc []byte) (Result, error) {
-	raw, err := q.Raw(rawFixture)
+func Classify(q Question, rawFixtures, hdfDocs [][]byte) (Result, error) {
+	raw, err := q.Raw(rawFixtures)
 	if err != nil {
 		return Result{}, fmt.Errorf("%s: raw answer: %w", q.ID, err)
 	}
-	hdf, err := q.HDF(hdfDoc)
+	hdf, err := q.HDF(hdfDocs)
 	if err != nil {
 		return Result{}, fmt.Errorf("%s: hdf answer: %w", q.ID, err)
 	}
 	return Result{
 		ID:        q.ID,
-		Prompt:    q.Prompt,
 		RawAnswer: raw,
 		HDFAnswer: hdf,
 		Class:     classOf(raw, hdf),

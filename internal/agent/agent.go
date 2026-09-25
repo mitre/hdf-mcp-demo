@@ -14,11 +14,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/mitre/hdf-mcp-demo/internal/instrument"
 )
+
+// ErrIterationCap marks an arm that stopped because it ran out of tool round
+// trips, not because it could not answer. Reports must distinguish the two: a
+// capped arm's accuracy is a lower bound on its capability.
+var ErrIterationCap = errors.New("reached max iterations")
 
 // ToolBox is the set of tools an arm exposes to the model, and the executor for
 // calls the model makes.
@@ -36,6 +42,10 @@ type Result struct {
 	Iterations       int
 	Elapsed          time.Duration
 	ReasoningTokens  string // last turn's reasoning_content, if any (observability)
+	// Transcript is the full conversation as it stood when the loop returned —
+	// including on error, so a failing arm can be diagnosed from evidence rather
+	// than inference.
+	Transcript []instrument.Message
 }
 
 // TotalTokens is the end-to-end token cost of answering (prompt + completion,
@@ -57,7 +67,7 @@ func Run(ctx context.Context, inst instrument.Instrument, tb ToolBox, systemProm
 	for res.Iterations = 0; res.Iterations < maxIters; res.Iterations++ {
 		out, err := inst.Chat(ctx, msgs, tools)
 		if err != nil {
-			res.Elapsed = time.Since(start)
+			res.Elapsed, res.Transcript = time.Since(start), msgs
 			return res, err
 		}
 		res.PromptTokens += out.PromptTokens
@@ -67,7 +77,7 @@ func Run(ctx context.Context, inst instrument.Instrument, tb ToolBox, systemProm
 
 		if len(out.Message.ToolCalls) == 0 {
 			res.Answer = out.Message.Content
-			res.Elapsed = time.Since(start)
+			res.Elapsed, res.Transcript = time.Since(start), msgs
 			return res, nil
 		}
 		for _, tc := range out.Message.ToolCalls {
@@ -80,6 +90,6 @@ func Run(ctx context.Context, inst instrument.Instrument, tb ToolBox, systemProm
 			msgs = append(msgs, instrument.Message{Role: "tool", ToolCallID: tc.ID, Content: toolOut})
 		}
 	}
-	res.Elapsed = time.Since(start)
-	return res, fmt.Errorf("reached max iterations (%d) without a final answer", maxIters)
+	res.Elapsed, res.Transcript = time.Since(start), msgs
+	return res, fmt.Errorf("%w (%d) without a final answer", ErrIterationCap, maxIters)
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -23,6 +25,31 @@ import (
 type stubInstrument struct{}
 
 var jsonNameRE = regexp.MustCompile(`[\w.-]+\.json`)
+
+// TestEnvIsWhereNotHow pins the split Env exists for. Env is WHERE a run happens
+// — the session, the binary, the fixtures, the root — and Options is the per-run
+// POLICY. Folding policy into Env would put a run's knobs and its location behind
+// one name again, which is what made the eight positional parameters possible.
+// Needs no session, so it runs in the ordinary offline suite.
+func TestEnvIsWhereNotHow(t *testing.T) {
+	typ := reflect.TypeOf(Env{})
+	want := []string{"Session", "Bin", "FixturesDir", "Root"}
+	if typ.NumField() != len(want) {
+		t.Errorf("Env has %d fields, want exactly %d (%v)", typ.NumField(), len(want), want)
+	}
+	for _, name := range want {
+		if _, ok := typ.FieldByName(name); !ok {
+			t.Errorf("Env is missing %q", name)
+		}
+	}
+	// Options, or any of its knobs, appearing here would re-merge policy into
+	// location — the anti-pattern this card names.
+	for _, policy := range []string{"Options", "Opts", "MaxIters", "Repeat", "Concurrency", "AdHoc", "TranscriptDir", "Tools"} {
+		if _, ok := typ.FieldByName(policy); ok {
+			t.Errorf("Env carries %q; Options is per-run policy, Env is where the run happens", policy)
+		}
+	}
+}
 
 func (stubInstrument) Name() string { return "stub" }
 
@@ -96,8 +123,11 @@ func TestBenchmark_Pipeline(t *testing.T) {
 	}
 	defer func() { _ = sess.Close() }()
 
-	// Concurrency > 1 exercises the parallel path and the shared-session mutex.
-	results, err := Run(context.Background(), stubInstrument{}, sess, "../../fixtures", root, Bank(), Options{MaxIters: 4, Concurrency: 3})
+	// Concurrency > 1 exercises the parallel path and the shared-session mutex;
+	// TranscriptDir exercises the diagnostic capture under concurrency.
+	trDir := t.TempDir()
+	results, err := Run(context.Background(), stubInstrument{}, Env{Session: sess, Bin: bin, FixturesDir: "../../fixtures", Root: root}, Bank(),
+		Options{MaxIters: 4, Concurrency: 3, TranscriptDir: trDir})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -105,6 +135,15 @@ func TestBenchmark_Pipeline(t *testing.T) {
 
 	if len(results) != len(Bank()) {
 		t.Fatalf("got %d results, want %d", len(results), len(Bank()))
+	}
+
+	// One transcript per (question, arm): raw + hdf for every bank question.
+	trs, err := filepath.Glob(filepath.Join(trDir, "stub", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 2 * len(Bank()); len(trs) != want {
+		t.Errorf("transcripts written = %d, want %d", len(trs), want)
 	}
 
 	// Ground truth is computed from data — pin the headline classes.
@@ -117,6 +156,17 @@ func TestBenchmark_Pipeline(t *testing.T) {
 		"grype-has-critical":      truth.ClassA, // Critical present both views
 		"zap-alert-count":         truth.ClassA, // 28 == 28 (no dedup)
 		"zap-high-severity-count": truth.ClassA, // 3 == 3 (severity preserved)
+		"inspec-control-count":    truth.ClassA, // 192 == 192 (InSpec is already rule-shaped)
+		"inspec-compliance-rate":  truth.ClassA, // 80% == 80% (pass/fail is native to a compliance run)
+		"grype-related-vulns":     truth.ClassA, // 45 == 45: conversion keeps the field in code; only the READ SURFACE lacks it
+		"cross-format-high-count": truth.ClassA, // 0+3+57 == 60 across three severity vocabularies — the mapping is band-aligned
+		"grype-fixed-vulns":       truth.ClassA, // 5 == 5 distinct IDs fixed between the real alpine:3.11/3.12 pair
+		"sbom-vuln-free-packages": truth.ClassD, // the join key is carried as a BOM reference, not embedded — raw-only
+		// Multi-source questions (ADR-0016 §7): the HDF arm reads the three
+		// converted documents (one call over sources[]); the raw arm reads three scans.
+		"multi-distinct-cwe-count":   truth.ClassA, // 10 == 10: gosec cwe.id ∪ ZAP cweid vs the union of the converted docs' normalized cwe fields
+		"multi-zap-high-count":       truth.ClassA, // 3 == 3: ZAP riskcode 3 vs impact>=0.7 in zap.hdf.json, the second source
+		"multi-nist-sc-failed-count": truth.ClassC, // 16: a NIST-family rollup across tools exists only after normalization
 	}
 	for _, r := range results {
 		if want[r.ID] != r.Class {
@@ -130,11 +180,47 @@ func TestBenchmark_Pipeline(t *testing.T) {
 		}
 	}
 
-	out := Render("stub", results, false)
-	for _, must := range []string{"accuracy by type", "token cost", "notes / limitations", "hdf-mcp arm (pipeline)"} {
+	out := Render("stub", results, false, nil)
+	for _, must := range []string{"accuracy by type", "token cost", "docs/interpreting-results.md", "hdf-mcp arm (pipeline)"} {
 		if !strings.Contains(out, must) {
 			t.Errorf("report missing %q", must)
 		}
 	}
 	t.Logf("\n%s", out)
+}
+
+// TestBenchmark_ReusedRootAcrossModels pins the multi-model invariant: cmd/benchmark
+// creates ONE HDF_MCP_ROOT and iterates models through it, so Run must tolerate a
+// root that already holds a previous model's normalized artifacts. Before staging
+// became idempotent, every model after the first died on the first fixture with
+// hdf_convert's OUTPUT_EXISTS — a single-model run passed while every multi-model
+// run lost all but one model.
+func TestBenchmark_ReusedRootAcrossModels(t *testing.T) {
+	bin := os.Getenv("HDF_BIN")
+	if bin == "" {
+		p, err := exec.LookPath("hdf")
+		if err != nil {
+			t.Skip("set HDF_BIN=/path/to/hdf (or put hdf on PATH) to run the reused-root integration test")
+		}
+		bin = p
+	}
+
+	root := t.TempDir()
+	env := append(os.Environ(), "HDF_MCP_ROOT="+root, "HDF_MCP_ENABLE_WRITES=1")
+	sess, err := mcpclient.Connect(context.Background(), bin, env)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	bank := Bank()[:1] // one question is enough; the failure was in staging
+	for model := 1; model <= 2; model++ {
+		results, err := Run(context.Background(), stubInstrument{}, Env{Session: sess, Bin: bin, FixturesDir: "../../fixtures", Root: root}, bank, Options{MaxIters: 4})
+		if err != nil {
+			t.Fatalf("model %d over a shared root: %v", model, err)
+		}
+		if len(results) != len(bank) {
+			t.Fatalf("model %d: got %d results, want %d", model, len(results), len(bank))
+		}
+	}
 }

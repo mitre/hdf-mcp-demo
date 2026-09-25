@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // rawGosec is the subset of gosec JSON the classifier reads. gosec emits one
@@ -60,6 +61,9 @@ type rawGrype struct {
 			ID       string `json:"id"`
 			Severity string `json:"severity"`
 		} `json:"vulnerability"`
+		Artifact struct {
+			Name string `json:"name"`
+		} `json:"artifact"`
 	} `json:"matches"`
 }
 
@@ -164,4 +168,294 @@ func ZapHighCount(b []byte) (Answer, error) {
 		}
 	}
 	return Answered(strconv.Itoa(n)), nil
+}
+
+// rawInspec is the subset of an InSpec ExecJSON run the classifier reads. InSpec
+// reports per-control results, and a control may have several (one per test), so
+// control count and result count are different questions — the same distinction
+// gosec forces between rules and finding sites.
+type rawInspec struct {
+	Profiles []struct {
+		Controls []struct {
+			ID      string `json:"id"`
+			Results []struct {
+				Status string `json:"status"`
+			} `json:"results"`
+		} `json:"controls"`
+	} `json:"profiles"`
+}
+
+func parseInspec(b []byte) (rawInspec, error) {
+	var i rawInspec
+	if err := json.Unmarshal(b, &i); err != nil {
+		return rawInspec{}, fmt.Errorf("parse inspec: %w", err)
+	}
+	return i, nil
+}
+
+// InspecControlCount is the number of controls across all profiles. InSpec is
+// already rule-shaped, so normalization has nothing to deduplicate and this
+// agrees with the HDF requirement count — an apples-to-apples Class-A count over
+// a large document.
+func InspecControlCount(b []byte) (Answer, error) {
+	i, err := parseInspec(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	n := 0
+	for _, p := range i.Profiles {
+		n += len(p.Controls)
+	}
+	return Answered(strconv.Itoa(n)), nil
+}
+
+// InspecComplianceRate is passed results / total results as a whole-number
+// percent. Unlike a vulnerability scanner, a compliance run states pass and fail
+// natively, so the raw view CAN answer this — it is the fair counterpart to the
+// Class-C grype rate, and it must match HDFComplianceRate's result-level
+// definition to stay comparable.
+func InspecComplianceRate(b []byte) (Answer, error) {
+	i, err := parseInspec(b)
+	if err != nil {
+		return Answer{}, err
+	}
+	var passed, total int
+	for _, p := range i.Profiles {
+		for _, c := range p.Controls {
+			for _, r := range c.Results {
+				total++
+				if r.Status == "passed" {
+					passed++
+				}
+			}
+		}
+	}
+	if total == 0 {
+		return Answered("0"), nil
+	}
+	return Answered(strconv.Itoa(passed * 100 / total)), nil
+}
+
+// gosecHighCount is the number of gosec findings at severity HIGH — gosec's top
+// band (its scale is LOW/MEDIUM/HIGH), so this is its "high or above" count.
+func gosecHighCount(b []byte) (int, error) {
+	g, err := parseGosec(b)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, i := range g.Issues {
+		if i.Severity == "HIGH" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// grypeHighPlusCount is the number of grype matches at High or Critical.
+func grypeHighPlusCount(b []byte) (int, error) {
+	g, err := parseGrype(b)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, m := range g.Matches {
+		if s := m.Vulnerability.Severity; s == "High" || s == "Critical" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// CrossFormatHighSeverityCount is the raw view of the cross-format aggregate:
+// the total high-or-above findings across three UNLIKE severity vocabularies —
+// gosec (HIGH on a LOW/MEDIUM/HIGH scale), ZAP (riskcode 3 on 0–3), and grype
+// (High/Critical on Critical..Unknown). The raw arm must reconcile all three
+// vocabularies itself; the sources arrive in declaration order (gosec, zap,
+// grype). This is the normalization-as-join-point case HDF exists for.
+func CrossFormatHighSeverityCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 3 {
+		return Answer{}, fmt.Errorf("cross-format count needs gosec, zap, grype documents; got %d", len(docs))
+	}
+	gosecN, err := gosecHighCount(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	zapA, err := ZapHighCount(docs[1])
+	if err != nil {
+		return Answer{}, err
+	}
+	zapN, err := strconv.Atoi(zapA.Value)
+	if err != nil {
+		return Answer{}, err
+	}
+	grypeN, err := grypeHighPlusCount(docs[2])
+	if err != nil {
+		return Answer{}, err
+	}
+	return Answered(strconv.Itoa(gosecN + zapN + grypeN)), nil
+}
+
+// grypeDistinctIDs is the set of distinct vulnerability IDs in a grype scan —
+// grype emits one match per vulnerable package instance, so the same CVE can
+// appear several times.
+func grypeDistinctIDs(b []byte) (map[string]bool, error) {
+	g, err := parseGrype(b)
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]bool{}
+	for _, m := range g.Matches {
+		ids[m.Vulnerability.ID] = true
+	}
+	return ids, nil
+}
+
+// GrypeDistinctFixedCount is the raw view of the temporal diff: how many
+// distinct vulnerability IDs from the previous scan (first source) are gone in
+// the current scan (second source). Distinct-ID level is deliberate: a
+// match-instance diff reports churn for CVEs that persist across package
+// version bumps, which is noise for the "what got fixed" intent.
+func GrypeDistinctFixedCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 2 {
+		return Answer{}, fmt.Errorf("temporal diff needs the previous and current scans; got %d documents", len(docs))
+	}
+	prev, err := grypeDistinctIDs(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	curr, err := grypeDistinctIDs(docs[1])
+	if err != nil {
+		return Answer{}, err
+	}
+	fixed := 0
+	for id := range prev {
+		if !curr[id] {
+			fixed++
+		}
+	}
+	return Answered(strconv.Itoa(fixed)), nil
+}
+
+// rawSPDX is the subset of an SPDX SBOM the classifier reads: the package
+// inventory by name.
+type rawSPDX struct {
+	Packages []struct {
+		Name string `json:"name"`
+	} `json:"packages"`
+}
+
+// SBOMVulnFreePackageCount is the raw view of the SBOM×vuln join: how many
+// packages the SBOM inventories (second source) have NO match in the grype scan
+// of the same image (first source). Answering requires BOTH documents — the
+// vulnerable-package set alone cannot say how many packages exist in total.
+func SBOMVulnFreePackageCount(docs [][]byte) (Answer, error) {
+	if len(docs) != 2 {
+		return Answer{}, fmt.Errorf("sbom join needs the vulnerability scan and the SBOM; got %d documents", len(docs))
+	}
+	g, err := parseGrype(docs[0])
+	if err != nil {
+		return Answer{}, err
+	}
+	vulnerable := map[string]bool{}
+	for _, m := range g.Matches {
+		vulnerable[m.Artifact.Name] = true
+	}
+	var s rawSPDX
+	if err := json.Unmarshal(docs[1], &s); err != nil {
+		return Answer{}, fmt.Errorf("parse spdx: %w", err)
+	}
+	free := 0
+	for _, p := range s.Packages {
+		if !vulnerable[p.Name] {
+			free++
+		}
+	}
+	return Answered(strconv.Itoa(free)), nil
+}
+
+// GrypeRelatedVulnCount counts matches carrying at least one related
+// vulnerability. This is a tool-specific field: grype records it, and while HDF
+// conversion preserves it verbatim inside the requirement's `code` payload, no
+// HDF read tool projects `code` — so it is the category-5 case where the bounded
+// surface, not normalization, is what costs the HDF arm.
+func GrypeRelatedVulnCount(b []byte) (Answer, error) {
+	var g struct {
+		Matches []struct {
+			Related []json.RawMessage `json:"relatedVulnerabilities"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(b, &g); err != nil {
+		return Answer{}, fmt.Errorf("parse grype: %w", err)
+	}
+	n := 0
+	for _, m := range g.Matches {
+		if len(m.Related) > 0 {
+			n++
+		}
+	}
+	return Answered(strconv.Itoa(n)), nil
+}
+
+// rawGosecCWE and rawZapCWE read only the CWE references: gosec's cwe.id and
+// ZAP's per-alert cweid. Grype output carries no CWE, so it contributes none.
+type rawGosecCWE struct {
+	Issues []struct {
+		CWE struct {
+			ID string `json:"id"`
+		} `json:"cwe"`
+	} `json:"Issues"`
+}
+
+type rawZapCWE struct {
+	Site []struct {
+		Alerts []struct {
+			CWEID string `json:"cweid"`
+		} `json:"alerts"`
+	} `json:"site"`
+}
+
+// cweCounts reports whether a raw CWE reference names a weakness: ZAP writes
+// "-1" for "no CWE" and an absent id is empty; neither is a CWE.
+func cweCounts(id string) bool {
+	id = strings.TrimSpace(id)
+	return id != "" && id != "-1"
+}
+
+// CrossToolDistinctCWECount is the raw view of the distinct-CWE question across
+// the three scanners (gosec, ZAP, grype, in declaration order): the union of
+// gosec's cwe.id and ZAP's cweid, compared by number. grype output carries no
+// CWE field at all, so the third document is required but contributes nothing —
+// which the raw arm has to discover for itself. The HDF view reads each
+// converted document's normalized `cwe` field ("CWE-22"); both views count the
+// number, as a union across scanners.
+func CrossToolDistinctCWECount(docs [][]byte) (Answer, error) {
+	if len(docs) != 3 {
+		return Answer{}, fmt.Errorf("distinct-CWE count needs gosec, zap, grype documents; got %d", len(docs))
+	}
+	var g rawGosecCWE
+	if err := json.Unmarshal(docs[0], &g); err != nil {
+		return Answer{}, fmt.Errorf("parse gosec: %w", err)
+	}
+	var z rawZapCWE
+	if err := json.Unmarshal(docs[1], &z); err != nil {
+		return Answer{}, fmt.Errorf("parse zap: %w", err)
+	}
+	if _, err := parseGrype(docs[2]); err != nil {
+		return Answer{}, err
+	}
+	seen := map[string]bool{}
+	for _, i := range g.Issues {
+		if cweCounts(i.CWE.ID) {
+			seen[strings.TrimSpace(i.CWE.ID)] = true
+		}
+	}
+	for _, s := range z.Site {
+		for _, a := range s.Alerts {
+			if cweCounts(a.CWEID) {
+				seen[strings.TrimSpace(a.CWEID)] = true
+			}
+		}
+	}
+	return Answered(strconv.Itoa(len(seen))), nil
 }
